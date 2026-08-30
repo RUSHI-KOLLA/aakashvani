@@ -67,9 +67,8 @@
         <div>
             <select id="mode">
                 <option value="off">Off — Disabled</option>
-                <option value="auto" selected>Auto (Free: GTX + Local TTS)</option>
-                <option value="edge">Edge (GTX + Local TTS)</option>
-                <option value="cloud">Cloud (Sarvam, BYOK, Paid)</option>
+                <option value="auto" selected>Auto (Chrome Translate + Local IITM TTS)</option>
+                <option value="edge">Edge (Chrome Translate + Local IITM TTS)</option>
             </select>
         </div>
     </div>
@@ -83,15 +82,6 @@
         <option value="ml-IN">Malayalam</option>
         <option value="mr-IN">Marathi</option>
     </select>
-
-    <div class="section-title">Sarvam API (Cloud Mode)</div>
-    <label>API Key</label>
-    <input type="password" id="api-key" placeholder="Paste your Sarvam API key">
-
-    <label style="display:flex; align-items:center; gap:8px; text-transform:none; letter-spacing:0; margin-bottom:12px; font-weight:500; color:#e2e8f0">
-        <input type="checkbox" id="cloud-fallback" style="width:auto; margin:0">
-        Allow paid cloud fallback when edge TTS fails
-    </label>
 
     <div class="section-title">Audio</div>
     <div class="slider-wrap">

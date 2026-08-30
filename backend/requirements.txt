@@ -1,6 +1,5 @@
 fastapi
 uvicorn[standard]
-httpx
 pydantic
 python-dotenv
 soundfile
@@ -8,9 +7,7 @@ scipy
 numpy
 pyyaml
 tqdm
-huggingface_hub
 # --- IITM FastSpeech2 + HiFi-GAN (HS) edge TTS ---
-transformers
 espnet==202511
 espnet_tts_frontend
 indic-num2words

@@ -12,8 +12,6 @@ const els = {
   videoStatus: $('video-status'),
   mode: $('mode'),
   language: $('language'),
-  apiKey: $('api-key'),
-  cloudFallback: $('cloud-fallback'),
   ducking: $('ducking'),
   volVal: $('vol-val'),
 };
@@ -21,8 +19,6 @@ const els = {
 const DEFAULTS = {
   mode: 'auto',
   language: 'te-IN',
-  apiKey: '',
-  cloudFallback: false,
   ducking: 10,
 };
 
@@ -88,8 +84,6 @@ async function loadSettings() {
   const settings = { ...DEFAULTS, ...saved };
   els.mode.value = settings.mode;
   els.language.value = settings.language;
-  els.apiKey.value = settings.apiKey;
-  els.cloudFallback.checked = settings.cloudFallback;
   els.ducking.value = settings.ducking;
   els.volVal.textContent = `${settings.ducking}%`;
   if (saved.authError) showWarning(saved.authError);
@@ -102,8 +96,6 @@ function saveSetting(key, value) {
 function bindEvents() {
   els.mode.addEventListener('change', () => saveSetting('mode', els.mode.value));
   els.language.addEventListener('change', () => saveSetting('language', els.language.value));
-  els.apiKey.addEventListener('input', () => saveSetting('apiKey', els.apiKey.value));
-  els.cloudFallback.addEventListener('change', () => saveSetting('cloudFallback', els.cloudFallback.checked));
   els.ducking.addEventListener('input', () => {
     els.volVal.textContent = `${els.ducking.value}%`;
     saveSetting('ducking', Number(els.ducking.value));
