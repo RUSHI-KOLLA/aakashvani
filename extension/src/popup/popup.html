@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AakashVani Settings</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: system-ui, sans-serif; width: 320px; padding: 16px; background: #0f172a; color: #e2e8f0; }
+        h2 { color: #818cf8; font-size: 18px; margin-bottom: 4px; }
+        .subtitle { color: #64748b; font-size: 12px; margin-bottom: 16px; }
+        .status { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 8px; margin-bottom: 16px; font-size: 13px; }
+        .status.ok { background: #064e3b; color: #6ee7b7; }
+        .status.err { background: #4c1d1d; color: #fca5a5; }
+        .status.loading { background: #1e3a5f; color: #93c5fd; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; }
+        .dot.green { background: #34d399; }
+        .dot.red { background: #f87171; }
+        .dot.yellow { background: #fbbf24; }
+        label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 4px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+        select, input[type="text"], input[type="password"] { width: 100%; padding: 8px 10px; border: 1px solid #334155; border-radius: 6px; background: #1e293b; color: #e2e8f0; font-size: 13px; margin-bottom: 12px; outline: none; }
+        select:focus, input:focus { border-color: #818cf8; }
+        .row { display: flex; gap: 10px; }
+        .row > div { flex: 1; }
+        .slider-wrap { margin-bottom: 12px; }
+        .slider-wrap input[type="range"] { width: 100%; margin-top: 4px; accent-color: #818cf8; }
+        .slider-val { float: right; color: #818cf8; font-size: 12px; font-weight: 600; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+        .badge.cloud { background: #312e81; color: #a5b4fc; }
+        .badge.edge { background: #064e3b; color: #6ee7b7; }
+        .video-badge { display: block; padding: 8px 12px; border-radius: 8px; font-size: 12px; font-weight: 600; margin-bottom: 12px; }
+        .video-badge.found { background: #064e3b; color: #6ee7b7; }
+        .video-badge.warning { background: #5c3d00; color: #fbbf24; }
+        .video-badge.missing { background: #4c1d1d; color: #fca5a5; }
+        .section-title { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin: 16px 0 8px; border-top: 1px solid #1e293b; padding-top: 12px; }
+        .header { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+        .header svg { flex-shrink: 0; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#818cf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M11 5 6 9H2v6h4l5 4V5Z"/>
+            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+        </svg>
+        <div>
+            <h2>AakashVani</h2>
+            <p class="subtitle" style="margin-bottom:0">Real-Time Indic Video Dubbing</p>
+        </div>
+    </div>
+
+    <div class="status loading" id="status">
+        <div class="dot yellow" id="status-dot"></div>
+        <span id="status-text">Checking server...</span>
+    </div>
+
+    <div class="status err" id="warning" style="display:none">
+        <div class="dot red"></div>
+        <span id="warning-text"></span>
+    </div>
+
+    <div class="video-badge missing" id="video-status">Checking video...</div>
+
+    <label>Mode</label>
+    <div class="row" style="margin-bottom:12px">
+        <div>
+            <select id="mode">
+                <option value="off">Off — Disabled</option>
+                <option value="auto" selected>Auto (Free: GTX + Local TTS)</option>
+                <option value="edge">Edge (GTX + Local TTS)</option>
+                <option value="cloud">Cloud (Sarvam, BYOK, Paid)</option>
+            </select>
+        </div>
+    </div>
+
+    <label>Target Language</label>
+    <select id="language">
+        <option value="te-IN">Telugu</option>
+        <option value="kn-IN">Kannada</option>
+        <option value="ta-IN">Tamil</option>
+        <option value="hi-IN">Hindi</option>
+        <option value="ml-IN">Malayalam</option>
+        <option value="mr-IN">Marathi</option>
+    </select>
+
+    <div class="section-title">Sarvam API (Cloud Mode)</div>
+    <label>API Key</label>
+    <input type="password" id="api-key" placeholder="Paste your Sarvam API key">
+
+    <label style="display:flex; align-items:center; gap:8px; text-transform:none; letter-spacing:0; margin-bottom:12px; font-weight:500; color:#e2e8f0">
+        <input type="checkbox" id="cloud-fallback" style="width:auto; margin:0">
+        Allow paid cloud fallback when edge TTS fails
+    </label>
+
+    <div class="section-title">Audio</div>
+    <div class="slider-wrap">
+        <label>Ducking Volume <span class="slider-val" id="vol-val">10%</span></label>
+        <input type="range" id="ducking" min="0" max="30" value="10">
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,46 @@
+# --- Secrets ---
+.env
+*.env
+!.env.example
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+
+# --- Python build/runtime artifacts ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+*.egg
+
+# --- PyInstaller / binary build artifacts ---
+dist/
+build/
+*.spec
+*.onefile-build/
+
+# --- Model checkpoints & weights (never commit) ---
+checkpoints/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.bin
+
+# --- Node (extension build tooling, if any) ---
+node_modules/
+dist-extension/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# --- HF cache if ever local ---
+hf_cache/

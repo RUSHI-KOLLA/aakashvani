@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "AakashVani — Indic Video Dubbing",
+  "version": "1.0.0",
+  "description": "Real-time Indic video dubbing via the local AakashVani engine.",
+  "permissions": ["storage", "scripting"],
+  "host_permissions": [
+    "http://127.0.0.1:8000/*",
+    "http://localhost:8000/*",
+    "https://www.youtube.com/*"
+  ],
+  "background": { "service_worker": "popup/service_worker.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["popup/sync_controller.js", "popup/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "AakashVani"
+  }
+}
