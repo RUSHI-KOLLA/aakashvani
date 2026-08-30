@@ -67,7 +67,8 @@ async def health():
 
 
 @app.on_event("startup")
-async def _startup_nmt():
-    from app.services import nmt
+async def _startup_models():
+    from app.services import fallback_tts, nmt
 
     await nmt.startup()  # preload local NLLB off the request path
+    await fallback_tts.startup()  # preload fallback voice if IITM checkpoint is absent

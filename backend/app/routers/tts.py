@@ -4,7 +4,7 @@ import base64
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.services import iitm_tts
+from app.services import fallback_tts, iitm_tts
 
 router = APIRouter(prefix="/api/v1", tags=["TTS"])
 
@@ -19,17 +19,21 @@ class TTSRequest(BaseModel):
 
 @router.post("/tts")
 async def synthesize_speech(req: TTSRequest):
-    if not iitm_tts.is_loaded():
-        raise HTTPException(
-            status_code=503,
-            detail="IITM TTS checkpoint not loaded. Set TTS_MODEL_DIR in .env "
-            "to a valid single-language FastSpeech2 checkpoint dir.",
-        )
-    wav_bytes, duration = await iitm_tts.synthesize(req.text, req.target_lang)
+    if iitm_tts.is_loaded():
+        wav_bytes, duration = await iitm_tts.synthesize(req.text, req.target_lang)
+        mode = "edge"
+    else:
+        # IITM checkpoint unavailable -> fallback voice so dubbing still works
+        try:
+            wav_bytes, _sr, duration = await fallback_tts.synthesize(req.text, req.target_lang)
+            mode = "edge-fallback"
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"TTS unavailable: {exc}")
     return {
         "status": "success",
-        "mode": "edge",
+        "mode": mode,
         "language_code": req.target_lang,
         "duration_seconds": round(duration, 3),
         "audio_base64": base64.b64encode(wav_bytes).decode("ascii"),
     }
+
