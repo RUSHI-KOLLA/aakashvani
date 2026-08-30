@@ -3,12 +3,24 @@
 // host permissions, settings, and retries live in one place.
 
 const ENGINE = 'http://127.0.0.1:8000';
+let sarvamBlocked = false;
+
+// Reset the circuit breaker whenever the user changes the API key or mode
+chrome.storage.onChanged.addListener((changes) => {
+  if (changes.apiKey || changes.mode) {
+    sarvamBlocked = false;
+    chrome.storage.local.remove('authError');
+  }
+});
 
 async function getSettings() {
   return chrome.storage.local.get(['mode', 'language', 'apiKey', 'cloudFallback', 'ducking']);
 }
 
 async function translateText(text, settings) {
+  if (sarvamBlocked && !settings.apiKey) {
+    throw new Error('Sarvam auth failed earlier — paste a valid API key in the popup to retry.');
+  }
   const body = {
     text,
     target_lang: settings.language || 'te-IN',
@@ -21,7 +33,16 @@ async function translateText(text, settings) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`translate ${res.status}: ${(await res.text()).slice(0, 120)}`);
+  if (!res.ok) {
+    // Circuit breaker: repeated 401/403 means the key is dead; stop hammering
+    // the API on every caption line until a new key is set.
+    if (res.status === 401 || res.status === 403) {
+      sarvamBlocked = true;
+      chrome.storage.local.set({ authError: 'Sarvam rejected the API key (403). Paste a valid key in the popup.' });
+      chrome.runtime.sendMessage({ type: 'AUTH_ERROR', error: 'Sarvam rejected the API key (403 invalid_api_key_error).' }).catch(() => {});
+    }
+    throw new Error(`translate ${res.status}: ${(await res.text()).slice(0, 120)}`);
+  }
   const data = await res.json();
   if (data.detail) throw new Error(data.detail);
   return data.translated_text || data.translation || data.text || '';

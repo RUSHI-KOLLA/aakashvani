@@ -84,7 +84,7 @@ async function checkVideo() {
 }
 
 async function loadSettings() {
-  const saved = await chrome.storage.local.get(Object.keys(DEFAULTS));
+  const saved = await chrome.storage.local.get([...Object.keys(DEFAULTS), 'authError']);
   const settings = { ...DEFAULTS, ...saved };
   els.mode.value = settings.mode;
   els.language.value = settings.language;
@@ -92,6 +92,7 @@ async function loadSettings() {
   els.cloudFallback.checked = settings.cloudFallback;
   els.ducking.value = settings.ducking;
   els.volVal.textContent = `${settings.ducking}%`;
+  if (saved.authError) showWarning(saved.authError);
 }
 
 function saveSetting(key, value) {
