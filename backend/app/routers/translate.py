@@ -1,11 +1,15 @@
-"""Translation router — Sarvam cloud NMT (BYOK). Local NMT was removed to
-keep the deployment footprint minimal; add a local NMT service here if
-offline translation is ever required."""
+"""Translation router — routes between local NLLB (edge/auto) and Sarvam cloud.
+
+- mode=edge (or auto with no valid Sarvam key): local nllb-200-distilled-600M
+- mode=cloud (or explicit API key + cloud fallback): Sarvam NMT (BYOK)
+"""
 import os
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel, Field
+
+from app.services import nmt
 
 router = APIRouter(prefix="/api/v1", tags=["Translation"])
 
@@ -17,18 +21,24 @@ class TranslateRequest(BaseModel):
     text: str = Field(min_length=1, max_length=5000)
     target_lang: str = "te-IN"
     source_lang: str = "en-IN"
-    mode: str = "cloud"  # kept for API compatibility
+    mode: str = "auto"  # edge | auto | cloud
     sarvam_api_key: str | None = None
 
 
 @router.post("/translate")
 async def translate_text(req: TranslateRequest):
     api_key = req.sarvam_api_key or os.getenv("SARVAM_API_KEY", "")
-    if not api_key:
-        return {
-            "detail": "Sarvam API key not configured. Add it in the extension "
-            "popup (Settings) or backend/.env."
-        }
+    use_cloud = req.mode == "cloud" or (req.mode == "auto" and api_key and nmt.is_loaded() is False)
+
+    if not use_cloud:
+        # Local-first: edge mode, or auto when the key is absent/invalid
+        try:
+            translated = await nmt.translate(req.text, req.source_lang, req.target_lang)
+            return {"translated_text": translated, "source": "local-nllb"}
+        except Exception as exc:
+            if not api_key:
+                return {"detail": f"Local NMT failed and no Sarvam key configured: {exc}"}
+            # fall through to cloud
 
     payload = {
         "input": req.text,

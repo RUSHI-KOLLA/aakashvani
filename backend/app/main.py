@@ -55,10 +55,19 @@ async def root():
 
 @app.get("/api/v1/health", tags=["Health"])
 async def health():
-    from app.services import iitm_tts
+    from app.services import iitm_tts, nmt
 
     return {
         "status": "ok",
         "tts_loaded": iitm_tts.is_loaded(),
         "tts_backend": iitm_tts.backend_name(),
+        "nmt_loaded": nmt.is_loaded(),
+        "nmt_backend": nmt.backend_name(),
     }
+
+
+@app.on_event("startup")
+async def _startup_nmt():
+    from app.services import nmt
+
+    await nmt.startup()  # preload local NLLB off the request path
