@@ -1,62 +1,100 @@
-"""Per-language IITM FastSpeech2 checkpoint store.
+"""Per-language IITM FastSpeech2-HS checkpoint store.
 
-Design (confirmed): the end user downloads ONLY the ~160MB checkpoint for the
-language they pick. Checkpoints are fetched on demand from
+Downloads on demand from the official IITM release:
+  https://huggingface.co/smtiitm/FastSpeech2_HS_latest_models
 
-    {TTS_CHECKPOINT_BASE_URL}/{lang_code}.zip     e.g. .../te.zip
+Repo layout (per language + gender):
+  {lang_name}/{gender}/model/{model.pth, config.yaml, feats_stats.npz,
+                              energy_stats.npz, pitch_stats.npz}
+  vocoder/{gender}/{lang_name}/{config.json, generator}
 
-Publish the zips anywhere reachable (e.g. your own HuggingFace dataset repo:
-https://huggingface.co/datasets/<user>/aakashvani-checkpoints/resolve/main/te.zip).
-If the repo is private, HF_TOKEN (or the cached ~/.cache/huggingface/token)
-authorizes the request. Each zip must contain (top-level or under one folder):
+Local layout after download (checkpoints/iitm_fastspeech2_<code>/):
+  model/{model.pth, config.yaml, feats_stats.npz, energy_stats.npz, pitch_stats.npz}
+  vocoder/{config.json, generator}
 
-    model.pth, config.yaml, feats_stats.npz [, hifigan/config.yml + *.pth]
-
-Extraction lands in  checkpoints/iitm_fastspeech2_<code>/  and is picked up by
-services/iitm_tts.py for that language.
+Per-user cost: ~210MB for the selected language only (152MB FastSpeech2 + ~55MB HiFi-GAN).
 """
 import logging
 import os
 import shutil
 import threading
 import urllib.request
-import zipfile
 from pathlib import Path
 
 logger = logging.getLogger("aakashvani.checkpoints")
 
 BASE_URL = os.getenv("TTS_CHECKPOINT_BASE_URL", "").rstrip("/")
+GENDER = os.getenv("TTS_GENDER", "female")
 CHECKPOINTS_ROOT = Path(
     os.getenv("TTS_CHECKPOINTS_ROOT", Path(__file__).resolve().parents[2] / "checkpoints")
 )
 
-LANG_CODES = {
-    "te-IN": "te", "hi-IN": "hi", "kn-IN": "kn",
-    "ta-IN": "ta", "ml-IN": "ml", "mr-IN": "mr",
+# app lang id -> (lang_code, repo language folder name)
+LANGS = {
+    "te-IN": ("te", "telugu_latest"),
+    "hi-IN": ("hi", "hindi_latest"),
+    "kn-IN": ("kn", "kannada_latest"),
+    "ta-IN": ("ta", "tamil_latest"),
+    "ml-IN": ("ml", "malayalam_latest"),
+    "mr-IN": ("mr", "marathi_latest"),
 }
+
+
+MODEL_FILES = ["model.pth", "config.yaml", "feats_stats.npz", "energy_stats.npz", "pitch_stats.npz"]
+# text-preprocessing dictionaries (loaded by IITM's Phonifier via dict_location)
+DICT_FILES = ["english"]  # per-language dict added dynamically
+
 
 _state = {
     "status": "idle", "lang": None, "progress": 0.0,
-    "downloaded": 0, "total": 0, "error": None,
+    "downloaded": 0, "total": 0, "error": None, "file": "",
 }
 _lock = threading.Lock()
 
 
 def lang_code(lang: str) -> str:
-    return LANG_CODES.get(lang, "")
+    return LANGS.get(lang, ("", ""))[0]
+
+
+def repo_lang_name(lang: str) -> str:
+    return LANGS.get(lang, ("", ""))[1]
 
 
 def checkpoint_dir(lang: str) -> Path:
-    return CHECKPOINTS_ROOT / f"iitm_fastspeech2_{lang_code(lang) or 'te'}"
+    code = lang_code(lang) or "te"
+    return CHECKPOINTS_ROOT / f"iitm_fastspeech2_{code}"
+
+
+def _remote_files(lang: str) -> list[tuple[str, Path]]:
+    """[(repo relative path, local destination path)] for one language."""
+    name = repo_lang_name(lang)
+    g = GENDER
+    d = checkpoint_dir(lang)
+    pairs = []
+    for f in MODEL_FILES:
+        pairs.append((f"{name}/{g}/model/{f}", d / "model" / f))
+    pairs.append((f"vocoder/{g}/{name}/config.json", d / "vocoder" / "config.json"))
+    pairs.append((f"vocoder/{g}/{name}/generator", d / "vocoder" / "generator"))
+    # text-preprocessing phone dictionaries (IITM Phonifier expects
+    # phone_dict/<language> and phone_dict/english under dict_location)
+    ddict = d / "phone_dict"
+    for f in [name] + DICT_FILES:
+        pairs.append((f"phone_dict/{f}", ddict / f))
+    return pairs
 
 
 def is_available(lang: str) -> bool:
     d = checkpoint_dir(lang)
-    return (d / "model.pth").exists() and (d / "config.yaml").exists()
+    return (
+        (d / "model" / "model.pth").exists()
+        and (d / "model" / "config.yaml").exists()
+        and (d / "vocoder" / "generator").exists()
+        and (d / "phone_dict" / repo_lang_name(lang)).exists()
+    )
 
 
 def available_languages() -> list[str]:
-    return [l for l in LANG_CODES if is_available(l)]
+    return [l for l in LANGS if is_available(l)]
 
 
 def status() -> dict:
@@ -72,63 +110,89 @@ def _auth_headers() -> dict:
     return {"Authorization": f"Bearer {tok}"} if tok else {}
 
 
-def _download_and_extract(lang: str) -> None:
-    code = lang_code(lang)
-    url = f"{BASE_URL}/{code}.zip"
-    logger.info("downloading %s", url)
-    _state.update(status="downloading", lang=lang, progress=0.0,
-                  downloaded=0, total=0, error=None)
-    CHECKPOINTS_ROOT.mkdir(parents=True, exist_ok=True)
-    tmp = CHECKPOINTS_ROOT / f"{code}.zip.part"
-    req = urllib.request.Request(url, headers=_auth_headers())
+def _url(repo_path: str) -> str:
+    return f"{BASE_URL}/{repo_path}?download=true"
+
+
+def _download_file(repo_path: str, dest: Path, counters: dict) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    req = urllib.request.Request(_url(repo_path), headers=_auth_headers())
     with urllib.request.urlopen(req, timeout=60) as resp:
-        total = int(resp.headers.get("Content-Length") or 0)
-        _state["total"] = total
-        done = 0
-        with open(tmp, "wb") as f:
+        size = int(resp.headers.get("Content-Length") or 0)
+        counters["total"] += size
+        with open(dest, "wb") as f:
             while True:
                 chunk = resp.read(1 << 20)
                 if not chunk:
                     break
                 f.write(chunk)
-                done += len(chunk)
-                _state.update(downloaded=done,
-                              progress=round(done * 100.0 / total, 1) if total else 0.0)
-    _state["status"] = "extracting"
-    dest = checkpoint_dir(lang)
-    if dest.exists():
-        shutil.rmtree(dest)
-    with zipfile.ZipFile(tmp) as z:
-        members = [m for m in z.namelist() if not m.endswith("/")]
-        # tolerate a single top-level folder inside the zip
-        prefix = ""
-        models = [m for m in members if m.endswith("model.pth")]
-        if models:
-            prefix = models[0][: models[0].rfind("model.pth")]
-        for m in members:
-            rel = m[len(prefix):] if prefix and m.startswith(prefix) else m
-            if not rel or rel.startswith("/") or ".." in rel:
-                continue
-            target = dest / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with z.open(m) as src, open(target, "wb") as out:
-                shutil.copyfileobj(src, out)
-    tmp.unlink(missing_ok=True)
+                counters["downloaded"] += len(chunk)
+                counters["file"] = repo_path
+                if counters["total"]:
+                    counters["progress"] = round(
+                        counters["downloaded"] * 100.0 / counters["total"], 1
+                    )
+                else:
+                    counters["progress"] = 0.0
+
+
+def _prepare_sizes(lang: str) -> dict[str, int]:
+    """Probe each file's size via a 1-byte Range GET (HF resolve URLs reject HEAD)."""
+    sizes = {}
+    for repo_path, _dest in _remote_files(lang):
+        req = urllib.request.Request(
+            _url(repo_path), headers={**_auth_headers(), "Range": "bytes=0-0"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                cr = resp.headers.get("Content-Range") or ""
+                # Content-Range: bytes 0-0/152128410
+                total = int(cr.split("/")[-1]) if "/" in cr else 0
+                sizes[repo_path] = total
+        except Exception as exc:
+            logger.warning("size probe failed for %s: %s", repo_path, exc)
+            sizes[repo_path] = 0
+    return sizes
+
+
+def _download_and_extract(lang: str) -> None:
+    pairs = _remote_files(lang)
+    _state.update(status="downloading", lang=lang, progress=0.0,
+                  downloaded=0, total=0, error=None)
+
+    # pre-compute total size for accurate progress
+    sizes = _prepare_sizes(lang)
+    total = sum(sizes.values())
+    counters = {"downloaded": 0, "total": total, "progress": 0.0, "file": ""}
+    _state["total"] = total
+    logger.info("downloading %s (%.1f MB across %d files)",
+                lang, total / 1e6, len(pairs))
+
+    for repo_path, dest in pairs:
+        if dest.exists() and dest.stat().st_size == sizes.get(repo_path, -1) > 0:
+            continue  # already complete from a previous partial run
+        _download_file(repo_path, dest, counters)
+        _state.update(downloaded=counters["downloaded"],
+                      progress=counters["progress"], file=counters["file"])
+
+    missing = [str(d) for _p, d in pairs if not d.exists()]
+    if missing:
+        raise RuntimeError(f"download incomplete, missing files: {missing}")
     _state.update(status="ready", lang=lang, progress=100.0, error=None)
-    logger.info("checkpoint ready for %s at %s", lang, dest)
+    logger.info("checkpoint ready for %s at %s", lang, checkpoint_dir(lang))
 
 
 def _worker(lang: str) -> None:
     try:
         _download_and_extract(lang)
-    except Exception as exc:  # network errors, bad zip, 401/403, missing file
+    except Exception as exc:  # network errors, 401/403, bad path
         logger.error("checkpoint fetch failed for %s: %s", lang, exc)
         _state.update(status="error", error=str(exc))
 
 
 def prepare(lang: str) -> dict:
-    """Start background download+extract if needed. Non-blocking."""
-    if lang not in LANG_CODES:
+    """Start background download if needed. Non-blocking."""
+    if lang not in LANGS:
         return {"ok": False, "error": f"unsupported language '{lang}'"}
     if is_available(lang):
         _state.update(status="ready", lang=lang, progress=100.0, error=None)
@@ -136,9 +200,8 @@ def prepare(lang: str) -> dict:
     if not BASE_URL:
         return {
             "ok": False,
-            "error": "TTS_CHECKPOINT_BASE_URL is not configured. Publish per-language "
-                     "zips (te.zip, hi.zip, ...) there, or drop the checkpoint folder "
-                     f"manually into {checkpoint_dir(lang)} and restart.",
+            "error": "TTS_CHECKPOINT_BASE_URL is not configured. Set it to "
+                     "https://huggingface.co/smtiitm/FastSpeech2_HS_latest_models/resolve/main",
         }
     with _lock:
         if _state["status"] in ("downloading", "extracting") and _state["lang"] == lang:

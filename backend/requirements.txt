@@ -6,6 +6,7 @@ soundfile
 scipy
 numpy
 pyyaml
+pandas
 tqdm
 # --- IITM FastSpeech2 + HiFi-GAN (HS) edge TTS ---
 espnet==202511
