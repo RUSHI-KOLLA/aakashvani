@@ -1,15 +1,16 @@
-"""TTS router — IITM FastSpeech2 + HiFi-GAN only.
+"""TTS router — IITM FastSpeech2 + HiFi-GAN only (per-language, on demand).
 
-No fallback models are loaded (vits_rasa/NLLB removed by design). If the
-checkpoint is absent the endpoint returns a clear 503 so the operator
-restores the ~160MB checkpoint rather than silently degrading quality.
+Endpoints:
+  POST /api/v1/tts                synthesize (auto-loads model if checkpoint present)
+  POST /api/v1/tts/prepare        start background checkpoint download (~160MB)
+  GET  /api/v1/tts/prepare/status poll download/extract progress
 """
 import base64
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.services import iitm_tts
+from app.services import checkpoint_store, iitm_tts
 
 router = APIRouter(prefix="/api/v1", tags=["TTS"])
 
@@ -21,22 +22,52 @@ class TTSRequest(BaseModel):
     speaker_id: int | str | None = None
 
 
+class PrepareRequest(BaseModel):
+    lang: str = "te-IN"
+
+
 @router.post("/tts")
 async def synthesize_speech(req: TTSRequest):
-    if not iitm_tts.is_loaded():
-        raise HTTPException(
-            status_code=503,
-            detail="IITM FastSpeech2 checkpoint not loaded. "
-            f"Set TTS_MODEL_DIR in backend/.env (currently '{iitm_tts.TTS_MODEL_DIR}') "
-            "to the folder containing model.pth + config.yaml "
-            "(+ optional hifigan/) and restart the engine.",
-        )
-    wav_bytes, duration = await iitm_tts.synthesize(req.text, req.target_lang)
+    lang = req.target_lang
+    try:
+        wav_bytes, duration = await iitm_tts.synthesize(req.text, lang)
+    except RuntimeError as exc:
+        msg = str(exc)
+        if msg.startswith("__CHECKPOINT_MISSING__"):
+            missing = msg.replace("__CHECKPOINT_MISSING__", "")
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "message": f"Voice checkpoint for {missing} is not downloaded yet.",
+                    "checkpoint_missing": missing,
+                    "prepare_hint": f"POST /api/v1/tts/prepare {{\"lang\":\"{missing}\"}}",
+                },
+            )
+        raise HTTPException(status_code=503, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     return {
         "status": "success",
         "mode": "edge",
-        "language_code": req.target_lang,
+        "language_code": lang,
         "duration_seconds": round(duration, 3),
         "audio_base64": base64.b64encode(wav_bytes).decode("ascii"),
     }
 
+
+@router.post("/tts/prepare")
+async def prepare_checkpoint(req: PrepareRequest):
+    """Start downloading the ~160MB checkpoint for `lang` in the background."""
+    result = checkpoint_store.prepare(req.lang)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "prepare failed"))
+    return result
+
+
+@router.get("/tts/prepare/status")
+async def prepare_status():
+    st = checkpoint_store.status()
+    st["checkpoint_available"] = checkpoint_store.available_languages()
+    st["tts_loaded"] = iitm_tts.is_loaded()
+    st["tts_current_lang"] = iitm_tts.current_language()
+    return st

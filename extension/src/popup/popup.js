@@ -100,6 +100,20 @@ function bindEvents() {
     els.volVal.textContent = `${els.ducking.value}%`;
     saveSetting('ducking', Number(els.ducking.value));
   });
+  // Voice checkpoint download progress (broadcast by the service worker)
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.type === 'CHECKPOINT_PROGRESS') {
+      if (msg.status === 'downloading') {
+        setVideoStatus('warning', `Downloading ${msg.lang} voice... ${msg.progress ?? 0}%`);
+      } else if (msg.status === 'extracting') {
+        setVideoStatus('warning', `Preparing ${msg.lang} voice...`);
+      } else if (msg.status === 'ready') {
+        setVideoStatus('found', `${msg.lang} voice ready \u2014 dubbing enabled`);
+      } else if (msg.status === 'error') {
+        setVideoStatus('missing', `Voice download failed: ${msg.error}`);
+      }
+    }
+  });
 }
 
 document.addEventListener('DOMContentLoaded', async () => {

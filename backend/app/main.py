@@ -52,10 +52,13 @@ async def root():
 
 @app.get("/api/v1/health", tags=["Health"])
 async def health():
-    from app.services import iitm_tts
+    from app.services import checkpoint_store, iitm_tts
 
     return {
         "status": "ok",
         "tts_loaded": iitm_tts.is_loaded(),
         "tts_backend": iitm_tts.backend_name(),
+        "tts_current_lang": iitm_tts.current_language(),
+        "checkpoints_available": checkpoint_store.available_languages(),
+        "checkpoint_base_url_configured": bool(checkpoint_store.BASE_URL),
     }

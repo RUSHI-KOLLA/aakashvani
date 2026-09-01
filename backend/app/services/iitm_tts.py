@@ -1,14 +1,13 @@
-"""IITM FastSpeech2 + HiFi-GAN inference service (single-language checkpoint).
+"""IITM FastSpeech2 + HiFi-GAN inference service (per-language, on demand).
 
-Loads ONE local checkpoint directory (TTS_MODEL_DIR in .env) containing:
-  - model.pth        — FastSpeech2 espnet checkpoint
-  - config.yaml      — espnet training config (token list, frontend)
-  - feats_stats.npz  — normalization statistics
-  - hifigan/ (optional) — separate HiFi-GAN vocoder (config.yml + *.pth)
+Exactly ONE language model is resident at a time (VRAM-safe on small GPUs).
+synthesize(text, lang) hot-swaps: if a different language is requested, the
+previous model is dropped and the new one loaded from its checkpoint dir
+(checkpoints/iitm_fastspeech2_<code>/, see services/checkpoint_store.py).
 
 All heavy tensor work is pinned to _EDGE_TTS_EXECUTOR so the FastAPI event
 loop is never blocked. Missing checkpoints raise descriptive RuntimeErrors —
-no silent fallbacks.
+no silent fallbacks (vits_rasa/NLLB removed by design).
 """
 import asyncio
 import io
@@ -17,26 +16,28 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+
+from app.services import checkpoint_store
 
 logger = logging.getLogger("aakashvani.iitm_tts")
 
-TTS_MODEL_DIR = Path(os.getenv("TTS_MODEL_DIR", "checkpoints/iitm_fastspeech2"))
 MAX_WORKERS = int(os.getenv("TTS_MAX_WORKERS", "1"))  # one GPU job at a time
+SUPPORTED_LANGS = sorted(checkpoint_store.LANG_CODES)
 
-# Supported Indic language identifiers (single checkpoint = single language;
-# the identifier is validated and echoed in the response payload).
-SUPPORTED_LANGS = {"te-IN", "hi-IN", "kn-IN", "ta-IN", "ml-IN", "mr-IN"}
-
-# Dedicated executor: keeps synthesis off the event loop and caps GPU
-# concurrency explicitly (unbounded default pools caused VRAM thrash).
 _EDGE_TTS_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="edge-tts")
 
-_state = {"loaded": False, "backend": "unavailable", "t2s": None, "sample_rate": 22050}
+_state = {
+    "loaded": False,
+    "backend": "no model loaded",
+    "lang": None,
+    "t2s": None,
+    "sample_rate": 22050,
+    "loading": False,
+}
 _load_lock = threading.Lock()
 
-def _find_vocoder_kwargs(model_dir: Path) -> dict:
-    """Detect a separate HiFi-GAN vocoder next to the FastSpeech2 checkpoint."""
+
+def _find_vocoder_kwargs(model_dir):
     hifigan = model_dir / "hifigan"
     cfg = hifigan / "config.yml"
     if cfg.exists():
@@ -48,55 +49,66 @@ def _find_vocoder_kwargs(model_dir: Path) -> dict:
     return {}
 
 
-def _try_load() -> None:
-    """Load the single-language FastSpeech2 checkpoint. Runs once in a worker
-    thread at startup. Raises RuntimeError with actionable detail on failure."""
+def _try_load(lang: str) -> None:
+    """Load (or hot-swap to) the checkpoint for `lang`. Raises RuntimeError
+    with actionable detail if files are missing/broken."""
     with _load_lock:
-        if _state["loaded"]:
+        if _state["loaded"] and _state["lang"] == lang:
             return
+        _state["loading"] = True
         t0 = time.time()
         try:
             import torch
             from espnet2.bin.tts_inference import Text2Speech
 
-            if not TTS_MODEL_DIR.exists():
+            model_dir = checkpoint_store.checkpoint_dir(lang)
+            model_file = model_dir / "model.pth"
+            config_file = model_dir / "config.yaml"
+            if not model_dir.exists() or not model_file.exists() or not config_file.exists():
                 raise RuntimeError(
-                    f"IITM TTS checkpoint directory not found: '{TTS_MODEL_DIR}'. "
-                    "Expected layout: model.pth, config.yaml, feats_stats.npz "
-                    "(+ optional hifigan/). Set TTS_MODEL_DIR in backend/.env and "
-                    "place the IITM FastSpeech2 + HiFi-GAN (HS) release there."
-                )
-            model_file = TTS_MODEL_DIR / "model.pth"
-            config_file = TTS_MODEL_DIR / "config.yaml"
-            if not model_file.exists() or not config_file.exists():
-                raise RuntimeError(
-                    f"Incomplete checkpoint in '{TTS_MODEL_DIR}': "
-                    f"model.pth={model_file.exists()}, config.yaml={config_file.exists()}. "
-                    "Restore the full IITM FastSpeech2 checkpoint for this language."
+                    f"IITM FastSpeech2 checkpoint for {lang} not found at '{model_dir}' "
+                    "(expected model.pth + config.yaml). Use POST /api/v1/tts/prepare "
+                    f"to download it, or restore the folder manually."
                 )
 
             device = "cuda" if torch.cuda.is_available() else "cpu"
+            # free the previous language model first (VRAM-safe swap)
+            if _state.get("t2s") is not None:
+                try:
+                    del _state["t2s"]
+                    if device == "cuda":
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+
             t2s = Text2Speech(
                 train_config=str(config_file),
                 model_file=str(model_file),
                 device=device,
-                **{k: str(v) for k, v in _find_vocoder_kwargs(TTS_MODEL_DIR).items()},
+                **{k: str(v) for k, v in _find_vocoder_kwargs(model_dir).items()},
             )
             _state["t2s"] = t2s
             _state["sample_rate"] = int(getattr(t2s, "fs", 22050) or 22050)
+            _state["lang"] = lang
             _state["loaded"] = True
-            _state["backend"] = f"iitm-fastspeech2+hifigan ({device})"
-            logger.info("IITM TTS loaded from %s on %s in %.1fs",
-                        TTS_MODEL_DIR, device, time.time() - t0)
+            _state["backend"] = f"iitm-fastspeech2+hifigan ({device}) [{lang}]"
+            logger.info("IITM TTS [%s] loaded from %s on %s in %.1fs",
+                        lang, model_dir, device, time.time() - t0)
         except Exception as exc:
             _state.update(loaded=False, backend=f"error: {exc}", t2s=None)
-            logger.error("IITM TTS load failed: %s", exc)
+            logger.error("IITM TTS load failed [%s]: %s", lang, exc)
+            raise
+        finally:
+            _state["loading"] = False
+
+
+def _load_in_executor(lang: str) -> None:
+    _try_load(lang)
 
 
 async def startup() -> None:
-    """Called at app startup; loads the checkpoint once, off the request path."""
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, _try_load)
+    """No auto-load: checkpoints arrive on demand per user-selected language."""
+    logger.info("IITM TTS ready (per-language on-demand loading)")
 
 
 def is_loaded() -> bool:
@@ -107,65 +119,56 @@ def backend_name() -> str:
     return _state["backend"]
 
 
-async def synthesize(text: str, target_lang: str) -> tuple[bytes, float]:
-    """Synthesize speech. All tensor work stays inside _EDGE_TTS_EXECUTOR.
+def current_language():
+    return _state["lang"]
 
-    Returns (wav_bytes, duration_seconds) for the /api/v1/tts payload.
-    Raises RuntimeError when the checkpoint is missing/not loaded or the
-    language identifier is unsupported.
-    """
-    if not _state["loaded"]:
-        raise RuntimeError(
-            f"IITM TTS not loaded: {_state['backend']}. Restore the checkpoint "
-            f"at '{TTS_MODEL_DIR}' and restart the engine."
-        )
-    if target_lang not in SUPPORTED_LANGS:
+
+def is_loading():
+    return _state["loading"]
+
+
+async def synthesize(text: str, target_lang: str) -> tuple[bytes, float]:
+    """Hot-swap to `target_lang` if needed, then synthesize.
+    Returns (wav_bytes, duration_seconds) for the /api/v1/tts payload."""
+    if target_lang not in checkpoint_store.LANG_CODES:
         raise ValueError(
-            f"Unsupported target language '{target_lang}'. Supported: {sorted(SUPPORTED_LANGS)}"
+            f"Unsupported target language '{target_lang}'. Supported: {SUPPORTED_LANGS}"
         )
+    if not checkpoint_store.is_available(target_lang):
+        raise RuntimeError(f"__CHECKPOINT_MISSING__{target_lang}")
+    if not _state["loaded"] or _state["lang"] != target_lang:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(_EDGE_TTS_EXECUTOR, _try_load, target_lang)
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_EDGE_TTS_EXECUTOR, _synthesize_sync, text, target_lang)
 
 
 def _synthesize_sync(text: str, target_lang: str) -> tuple[bytes, float]:
-    """Full sequential pipeline inside the thread worker:
-    text preprocessing (g2p/phonemize inside Text2Speech) -> FastSpeech2
-    mel-spectrogram -> HiFi-GAN waveform -> 16-bit PCM WAV bytes.
-    """
+    """text frontend -> FastSpeech2 mel -> HiFi-GAN waveform -> 16-bit PCM WAV."""
     import soundfile as sf
     import torch
 
     t2s = _state["t2s"]
     if t2s is None:
-        raise RuntimeError("IITM TTS model handle is None — startup load failed.")
-
+        raise RuntimeError("IITM TTS model handle is None — load failed.")
     t0 = time.time()
-
-    # 1+2) Text frontend (normalize -> phonemize) and FastSpeech2 decoding,
-    #      including HiFi-GAN vocoding if the checkpoint bundles/points to one.
     with torch.no_grad():
         out = t2s(text)
-
     wav = getattr(out, "wav", None)
     if wav is None and isinstance(out, dict):
         wav = out.get("wav")
     if wav is None:
         raise RuntimeError(
-            f"ESPnet Text2Speech returned no 'wav' attribute (got {type(out).__name__}). "
+            f"ESPnet Text2Speech returned no 'wav' (got {type(out).__name__}). "
             "The checkpoint may lack a vocoder; add hifigan/ to the checkpoint dir."
         )
     if hasattr(wav, "cpu"):
         wav = wav.cpu().numpy()
     wav = wav.squeeze().astype("float32")
-
     sr = _state["sample_rate"]
     duration = float(len(wav)) / sr
-
-    # 3) Encode raw float waveform to 16-bit PCM WAV in-memory for the router.
     buf = io.BytesIO()
-
     sf.write(buf, wav, sr, format="WAV", subtype="PCM_16")
-    logger.info("TTS %s: %.2fs audio from %d chars in %.2fs",
+    logger.info("TTS [%s]: %.2fs audio from %d chars in %.2fs",
                 target_lang, duration, len(text), time.time() - t0)
     return buf.getvalue(), duration
-

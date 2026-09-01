@@ -47,7 +47,7 @@ async function translateWithChrome(text, language) {
 }
 
 // ---------------------------------------------------------------------------
-// Backend TTS only (IITM FastSpeech2 + HiFi-GAN)
+// Backend TTS only (IITM FastSpeech2 + HiFi-GAN, per-language checkpoints)
 // ---------------------------------------------------------------------------
 async function synthesizeSpeech(text, settings) {
   const body = {
@@ -61,15 +61,54 @@ async function synthesizeSpeech(text, settings) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    const detail = (await res.text()).slice(0, 200);
-    throw res.status === 503
-      ? new Error(`TTS unavailable (IITM FastSpeech2 checkpoint missing): ${detail}`)
-      : new Error(`tts ${res.status}: ${detail}`);
+  if (res.status === 503) {
+    const err = await res.json().catch(() => ({}));
+    const detail = err.detail || {};
+    if (detail.checkpoint_missing) {
+      // Voice for this language isn't on disk yet -> fetch it (~160MB) once
+      const prepared = await prepareCheckpoint(detail.checkpoint_missing);
+      if (!prepared.ok) throw new Error(prepared.error || 'checkpoint download failed');
+      const retry = await fetch(`${ENGINE}/api/v1/tts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!retry.ok) throw new Error(`tts after prepare ${retry.status}`);
+      const data = await retry.json();
+      if (!data.audio_base64) throw new Error(data.detail || 'no audio after prepare');
+      return data;
+    }
+    throw new Error(`tts 503: ${JSON.stringify(detail).slice(0, 200)}`);
   }
+  if (!res.ok) throw new Error(`tts ${res.status}: ${(await res.text()).slice(0, 120)}`);
   const data = await res.json();
   if (!data.audio_base64) throw new Error(data.detail || 'no audio_base64 in TTS response');
   return data;
+}
+
+// Ask the engine to fetch the per-language checkpoint (~160MB) and wait.
+async function prepareCheckpoint(lang) {
+  const start = await fetch(`${ENGINE}/api/v1/tts/prepare`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lang }),
+  });
+  const startData = await start.json().catch(() => ({}));
+  if (!start.ok) return { ok: false, error: startData.detail || `prepare ${start.status}` };
+
+  for (let i = 0; i < 300; i++) { // poll up to ~10 minutes
+    await new Promise((r) => setTimeout(r, 2000));
+    const st = await fetch(`${ENGINE}/api/v1/tts/prepare/status`)
+      .then((r) => r.json()).catch(() => null);
+    if (!st) continue;
+    chrome.runtime.sendMessage({
+      type: 'CHECKPOINT_PROGRESS', lang,
+      status: st.status, progress: st.progress, error: st.error,
+    }).catch(() => {});
+    if (st.status === 'ready') return { ok: true };
+    if (st.status === 'error') return { ok: false, error: st.error };
+  }
+  return { ok: false, error: 'checkpoint download timed out' };
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
