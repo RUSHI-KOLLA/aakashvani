@@ -75,25 +75,34 @@ async function translateViaOffscreen(payload) {
 async function synthesizeSpeech(text, language) {
   const engine = await getEngineUrl();
   const body = { text, target_lang: language || 'te-IN' };
-  const res = await fetch(`${engine}/api/v1/tts`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (res.status === 503) {
-    const err = await res.json().catch(() => ({}));
-    const detail = err.detail || {};
-    if (detail.checkpoint_missing) {
-      // Don't block - start background preparation and return error immediately
-      prepareCheckpoint(detail.checkpoint_missing).catch(() => {});
-      throw new Error(`checkpoint_preparing:${detail.checkpoint_missing}`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const res = await fetch(`${engine}/api/v1/tts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (res.status === 503) {
+      const err = await res.json().catch(() => ({}));
+      const detail = err.detail || {};
+      if (detail.checkpoint_missing) {
+        prepareCheckpoint(detail.checkpoint_missing).catch(() => {});
+        throw new Error(`checkpoint_preparing:${detail.checkpoint_missing}`);
+      }
+      throw new Error(`tts 503: ${JSON.stringify(detail).slice(0, 200)}`);
     }
-    throw new Error(`tts 503: ${JSON.stringify(detail).slice(0, 200)}`);
+    if (!res.ok) throw new Error(`tts ${res.status}: ${(await res.text()).slice(0, 160)}`);
+    const data = await res.json();
+    if (!data.audio_base64) throw new Error(data.detail || 'no audio_base64 in TTS response');
+    return data;
+  } catch (e) {
+    clearTimeout(timeout);
+    if (e.name === 'AbortError') throw new Error('tts timeout (10s)');
+    throw e;
   }
-  if (!res.ok) throw new Error(`tts ${res.status}: ${(await res.text()).slice(0, 160)}`);
-  const data = await res.json();
-  if (!data.audio_base64) throw new Error(data.detail || 'no audio_base64 in TTS response');
-  return data;
 }
 
 async function prepareCheckpoint(lang) {

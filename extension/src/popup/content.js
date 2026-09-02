@@ -14,6 +14,7 @@
   const STABILITY_MS = 250;
   const PUNCT_RE = /[.?!।।…\u0964\u0965]$/;
   let lastDispatched = '';
+  let dispatchedIds = new Set(); // Track dispatched caption IDs for per-cue dedup
   let pendingCue = null;
   let debounce = null;
   let observer = null;
@@ -109,27 +110,29 @@
       const text = (caption.text || '').trim();
       if (!text) continue;
       const normalized = normalizeText(text);
-      const lastNormalized = normalizeText(lastDispatched);
 
-      // Exact duplicate of last dispatched
-      if (normalized === lastNormalized) continue;
+      // Dedup by caption ID (stable) — don't re-dispatch same cue
+      if (dispatchedIds.has(caption.id)) continue;
 
       // ---- P1-5: Correction detection — same cue ID with different text ----
       const prev = _dispatchedCues.get(caption.id);
       if (prev && normalizeText(prev.text) !== normalized) {
-        // Same cue identity, different text → correction. Invalidate old TTS.
         controller.invalidateCaption(caption.id);
         console.log(`[AakashVani] correction detected for ${caption.id}: "${prev.text.slice(0,40)}" → "${text.slice(0,40)}"`);
       }
 
       // ---- P0-3: Enqueue EACH cue with its own timing and ID ----
-      lastDispatched = text;
+      dispatchedIds.add(caption.id);
       _dispatchedCues.set(caption.id, { text, dispatchTime: Date.now() });
 
-      // Bound the map
+      // Bound the maps
       if (_dispatchedCues.size > MAX_DISPATCHED_CUES) {
         const oldest = _dispatchedCues.keys().next().value;
         _dispatchedCues.delete(oldest);
+      }
+      if (dispatchedIds.size > MAX_DISPATCHED_CUES) {
+        const oldest = dispatchedIds.values().next().value;
+        dispatchedIds.delete(oldest);
       }
 
       controller.enqueue(caption);
@@ -142,13 +145,8 @@
     if (!captions || !captions.length) return;
     pendingCue = captions[captions.length - 1];
 
-    const combinedText = captions.map(c => c.text).join(' ').trim();
-    if (PUNCT_RE.test(combinedText)) {
-      clearTimeout(debounce);
-      maybeDispatch(captions);
-      return;
-    }
-
+    // Always use stability debounce — don't immediate-flush on punctuation
+    // (YouTube re-renders punctuated captions multiple times)
     clearTimeout(debounce);
     debounce = setTimeout(() => {
       const now = readCaption();
@@ -165,7 +163,7 @@
     const player = document.querySelector('.html5-video-player') || document.body;
     if (observer) observer.disconnect();
     observer = new MutationObserver(onCaptionObserved);
-    observer.observe(player, { childList: true, subtree: true, characterData: true });
+    observer.observe(player, { childList: true, subtree: true });
 
     // Remove old cuechange listeners
     for (const { track, handler } of _trackRefs) {
@@ -202,6 +200,7 @@
 
     const seekedHandler = () => {
       lastDispatched = '';
+      dispatchedIds.clear();
       clearTimeout(debounce);
       _dispatchedCues.clear();
       controller.flush();
@@ -219,6 +218,7 @@
   document.addEventListener('yt-navigate-finish', () => {
     controller.flush();
     lastDispatched = '';
+    dispatchedIds.clear();
     clearTimeout(debounce);
     _dispatchedCues.clear();
     bindVideo();

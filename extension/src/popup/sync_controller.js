@@ -73,38 +73,52 @@ class TimelineScheduler {
     if (!this.video || this.video.paused) return;
     const now = this.video.currentTime;
 
+    // ---- B3: Explicit seek detection ----
+    if (this._lastVideoTime !== undefined && Math.abs(now - this._lastVideoTime) > 1.5) {
+      // Large jump = seek; reset to find correct segment
+      this.currentIndex = 0;
+      this._lastVideoTime = now;
+      // Fall through to re-evaluate
+    }
+    this._lastVideoTime = now;
+
+    // Single pass: advance past completed/discarded, play ready-at-time, discard stale
     while (this.currentIndex < this.segments.length) {
       const seg = this.segments[this.currentIndex];
+
+      // Skip completed/discarded
       if (seg.state === 'completed' || seg.state === 'discarded') {
         this.currentIndex++;
         continue;
       }
-      if (seg.state === 'ready' && now >= seg.targetStart - 0.1) {
-        this._playSegment(this.currentIndex);
-      }
-      break;
-    }
 
-    // Discard stale segments far behind
-    let advanced = true;
-    while (advanced) {
-      advanced = false;
-      if (this.currentIndex >= this.segments.length) break;
-      const seg = this.segments[this.currentIndex];
-      if (seg.state === 'ready' && now > seg.targetEnd + 2.0) {
-        console.log(`[AakashVani] discarding stale segment: ${seg.caption.text.slice(0,40)}`);
-        seg.state = 'discarded';
-        this._cleanupSegment(seg);
-        this.currentIndex++;
-        advanced = true;
-      } else if (seg.state === 'playing' && now > seg.targetEnd + 1.0) {
-        if (seg.audio.currentTime >= seg.audio.duration - 0.1) {
+      // Play ready segments at their start time
+      if (seg.state === 'ready') {
+        if (now >= seg.targetStart - 0.1) {
+          this._playSegment(this.currentIndex);
+        }
+        break; // Only play one at a time; next tick will advance
+      }
+
+      // Segment is playing — check for completion or stale
+      if (seg.state === 'playing') {
+        const audioDone = seg.audio.currentTime >= seg.audio.duration - 0.1;
+        const videoPastEnd = now > seg.targetEnd + 1.0;
+
+        if (audioDone) {
           seg.state = 'completed';
           this._cleanupSegment(seg);
           this.currentIndex++;
-          advanced = true;
+          continue; // Check next segment in same tick
+        }
+
+        if (videoPastEnd && !audioDone) {
+          // Video moved past segment but audio still playing — don't discard yet
+          // Let audio finish naturally (up to 1s grace after targetEnd)
         }
       }
+
+      break; // Stop at first non-advanced segment
     }
   }
 
@@ -119,7 +133,7 @@ class TimelineScheduler {
       if (seg.state !== 'playing') return;
       seg.state = 'completed';
       try { URL.revokeObjectURL(seg.audio._blobUrl); } catch (_) {}
-      this.tick();
+      // B4: Do NOT call tick() here — let main loop drive
     };
     seg.audio.onended = done;
     seg.audio.onerror = done;
@@ -136,22 +150,8 @@ class TimelineScheduler {
   }
 
   checkDrift() {
-    if (!this.video || this.currentIndex >= this.segments.length) return;
-    const seg = this.segments[this.currentIndex];
-    if (seg.state !== 'playing' || this.video.paused) return;
-    const now = this.video.currentTime;
-    const audioProgress = seg.audio.currentTime;
-    const expectedProgress = now - seg.targetStart;
-    const drift = expectedProgress - audioProgress;
-    let targetRate = 1.0;
-    if (drift > 0.9) targetRate = 1.25;
-    else if (drift > 0.65) targetRate = 1.15;
-    else if (drift > 0.4) targetRate = 1.05;
-    else if (drift < -0.5) targetRate = 0.95;
-    if (Math.abs(seg.audio.playbackRate - targetRate) > 0.02) {
-      seg.audio.playbackRate = targetRate;
-      if (targetRate !== 1.0) console.log(`[AakashVani] drift ${drift.toFixed(2)}s → ${targetRate}x`);
-    }
+    // B2: Disabled — playbackRate changes desync targetStart/targetEnd wall-clock times
+    // Instead rely on tick() re-evaluation and segment completion detection
   }
 
   clear() {
@@ -178,12 +178,32 @@ class SyncController {
     this._checkpointBuffer = [];
     this._checkpointBufferMax = 10;
 
+    // C3: LRU cache for translation + TTS
+    this._translationCache = new Map();
+    this._ttsCache = new Map();
+    this._cacheMax = 50;
+
     chrome.storage.local.get(['ducking', 'mode'], (s) => { this.settings = { ...this.settings, ...s }; });
     chrome.storage.onChanged.addListener((ch) => {
       if (ch.ducking) this.settings.ducking = ch.ducking.newValue;
       if (ch.mode) {
         this.settings.mode = ch.mode.newValue;
         if (ch.mode.newValue === 'off') this.flush();
+      }
+      if (ch.language) {
+        // C5: Clear checkpoint buffer on language change
+        console.log('[AakashVani] Language changed — clearing checkpoint buffer and caches');
+        this._checkpointBuffer = [];
+        this._translationCache.clear();
+        this._ttsCache.clear();
+      }
+    });
+
+    // C1: Listen for checkpoint progress from service worker — auto-retry when ready
+    chrome.runtime.onMessage.addListener((msg) => {
+      if (msg.type === 'CHECKPOINT_PROGRESS' && msg.status === 'ready') {
+        console.log('[AakashVani] Checkpoint ready for', msg.lang, '— retrying buffered captions');
+        this.retryCheckpointBuffer();
       }
     });
   }
@@ -207,7 +227,7 @@ class SyncController {
     const cid = caption.id || '';
     const isDuplicate = this.queue.some(q => (q.id || '') === cid) ||
       this.inflight.some(p => p._aakashCid === cid) ||
-      this.scheduler.segments.some(s => (s.caption.id || '') === cid && (s.state === 'ready' || s.state === 'playing' || s.state === 'pending'));
+      this.scheduler.segments.some(s => (s.caption.id || '') === cid && (s.state === 'ready' || s.state === 'playing' || s.state === 'pending' || s.state === 'completed'));
     if (isDuplicate) return;
     this.queue.push(caption);
     this.pumpPipeline();
@@ -254,53 +274,80 @@ class SyncController {
     const rawText = typeof caption === 'string' ? caption.trim() : (caption.text || '').trim();
     if (!rawText) return null;
 
-    let res;
-    try {
-      res = await chrome.runtime.sendMessage({
-        type: 'TRANSLATE',
-        text: rawText,
-        language: settings.language || 'te-IN',
-        mode: settings.mode || 'auto',
-        apiKey: settings.apiKey || '',
-      });
-    } catch (e) {
-      if (genAtStart !== undefined && genAtStart !== this._generation) return null;
-      console.warn(`[AakashVani] TRANSLATE transport error:`, e.message);
-      return null;
-    }
-    if (genAtStart !== undefined && genAtStart !== this._generation) return null;
-    if (!res) return null;
-    if (!res.ok) {
-      console.warn(`[AakashVani] TRANSLATE failed | text=${JSON.stringify(rawText).slice(0, 80)} | server: ${res.error}`);
-      throw new Error(res.error || 'translation failed');
-    }
-    const translated = res.translated;
-    if (!translated) return null;
+    const lang = settings.language || 'te-IN';
+    const cacheKey = `${rawText}|${lang}|${settings.mode || 'auto'}`;
 
-    if (genAtStart !== undefined && genAtStart !== this._generation) return null;
-    let tts;
-    try {
-      tts = await chrome.runtime.sendMessage({ type: 'TTS_ONLY', text: translated, language: settings.language || 'te-IN' });
-    } catch (e) {
-      if (genAtStart !== undefined && genAtStart !== this._generation) return null;
-      console.warn(`[AakashVani] TTS transport error:`, e.message);
-      return null;
-    }
-    if (!tts) return null;
-    if (!tts.ok) {
-      const errMsg = tts.error || '';
-      if (errMsg.startsWith('checkpoint_preparing:')) {
-        const missingLang = errMsg.split(':')[1];
-        console.warn(`[AakashVani] TTS checkpoint preparing for ${missingLang} — buffering segment`);
-        if (this._checkpointBuffer.length < this._checkpointBufferMax) {
-          this._checkpointBuffer.push({ caption, genAtStart, translated });
-        }
+    // C3: Check translation cache
+    let translated = this._translationCache.get(cacheKey);
+    if (!translated) {
+      let res;
+      try {
+        res = await chrome.runtime.sendMessage({
+          type: 'TRANSLATE',
+          text: rawText,
+          language: lang,
+          mode: settings.mode || 'auto',
+          apiKey: settings.apiKey || '',
+        });
+      } catch (e) {
+        if (genAtStart !== undefined && genAtStart !== this._generation) return null;
+        console.warn(`[AakashVani] TRANSLATE transport error:`, e.message);
         return null;
       }
-      console.warn(`[AakashVani] TTS failed (${tts.error?.slice(0, 120)}) | text=${JSON.stringify(translated).slice(0, 80)}`);
-      throw new Error(tts.error);
+      if (genAtStart !== undefined && genAtStart !== this._generation) return null;
+      if (!res) return null;
+      if (!res.ok) {
+        console.warn(`[AakashVani] TRANSLATE failed | text=${JSON.stringify(rawText).slice(0, 80)} | server: ${res.error}`);
+        throw new Error(res.error || 'translation failed');
+      }
+      translated = res.translated;
+      if (!translated) return null;
+      // Cache translation
+      if (this._translationCache.size >= this._cacheMax) {
+        const firstKey = this._translationCache.keys().next().value;
+        this._translationCache.delete(firstKey);
+      }
+      this._translationCache.set(cacheKey, translated);
     }
-    return tts.audio;
+
+    if (genAtStart !== undefined && genAtStart !== this._generation) return null;
+
+    // C3: Check TTS cache
+    const ttsCacheKey = `${translated}|${lang}`;
+    let audioBase64 = this._ttsCache.get(ttsCacheKey);
+    if (!audioBase64) {
+      let tts;
+      try {
+        tts = await chrome.runtime.sendMessage({ type: 'TTS_ONLY', text: translated, language: lang });
+      } catch (e) {
+        if (genAtStart !== undefined && genAtStart !== this._generation) return null;
+        console.warn(`[AakashVani] TTS transport error:`, e.message);
+        return null;
+      }
+      if (!tts) return null;
+      if (!tts.ok) {
+        const errMsg = tts.error || '';
+        if (errMsg.startsWith('checkpoint_preparing:')) {
+          const missingLang = errMsg.split(':')[1];
+          console.warn(`[AakashVani] TTS checkpoint preparing for ${missingLang} — buffering segment`);
+          if (this._checkpointBuffer.length < this._checkpointBufferMax) {
+            this._checkpointBuffer.push({ caption, genAtStart, translated });
+          }
+          return null;
+        }
+        console.warn(`[AakashVani] TTS failed (${tts.error?.slice(0, 120)}) | text=${JSON.stringify(translated).slice(0, 80)}`);
+        throw new Error(tts.error);
+      }
+      audioBase64 = tts.audio;
+      // Cache TTS
+      if (this._ttsCache.size >= this._cacheMax) {
+        const firstKey = this._ttsCache.keys().next().value;
+        this._ttsCache.delete(firstKey);
+      }
+      this._ttsCache.set(ttsCacheKey, audioBase64);
+    }
+
+    return audioBase64;
   }
 
   // ---- P1-7: Retry buffered captions when checkpoint becomes ready ----
@@ -358,14 +405,11 @@ class SyncController {
 
   tryPlayNext() {
     this.scheduler.tick();
-    this.scheduler.checkDrift();
+    // drift check disabled
   }
 
   _startDriftMonitor() {
-    this._stopDriftMonitor();
-    this.scheduler._monitorTimer = setInterval(() => {
-      this.scheduler.checkDrift();
-    }, 300);
+    // drift monitor disabled
   }
 
   _stopDriftMonitor() {
@@ -410,6 +454,8 @@ class SyncController {
     this.scheduler.clear();
     this.queue = [];
     this._checkpointBuffer = [];
+    this._translationCache.clear();
+    this._ttsCache.clear();
     this.playing = false;
     this.duck(false);
   }
