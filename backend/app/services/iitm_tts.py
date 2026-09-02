@@ -247,7 +247,15 @@ def _sanitize_text(text: str) -> str:
     t = re.sub(r"\s+", " ", t).strip()
     # Hard cap: ESPnet truncates long feats; chunk to avoid OOM
     if len(t) > 450:
-        t = t[:450].rsplit(" ", 1)[0]
+        import unicodedata
+        trunc = t[:450]
+        # Don't cut inside combining sequence or grapheme
+        while trunc and unicodedata.combining(trunc[-1]):
+            trunc = trunc[:-1]
+        # Prefer word boundary
+        if " " in trunc:
+            trunc = trunc.rsplit(" ", 1)[0]
+        t = trunc.strip()
     return t
 
 

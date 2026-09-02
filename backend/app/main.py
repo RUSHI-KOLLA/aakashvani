@@ -58,11 +58,30 @@ async def root():
 async def health():
     from app.services import checkpoint_store, iitm_tts
 
+    has_sarvam = bool(os.getenv("SARVAM_API_KEY") or os.getenv("HF_TOKEN"))
+    # structured health: healthy if at least one checkpoint ready, degraded if none, unavailable if backend error
+    checkpoints = checkpoint_store.available_languages()
+    if iitm_tts.is_loaded():
+        health_status = "healthy"
+    elif checkpoints:
+        health_status = "degraded"  # checkpoints ready but no model loaded yet
+    elif checkpoint_store.BASE_URL:
+        health_status = "degraded"
+    else:
+        health_status = "unavailable"
+
     return {
-        "status": "ok",
+        "status": health_status,
         "tts_loaded": iitm_tts.is_loaded(),
         "tts_backend": iitm_tts.backend_name(),
         "tts_current_lang": iitm_tts.current_language(),
-        "checkpoints_available": checkpoint_store.available_languages(),
+        "tts_loading": iitm_tts.is_loading(),
+        "checkpoints_available": checkpoints,
+        "checkpoints_status": checkpoint_store.status_all() if hasattr(checkpoint_store, "status_all") else {},
         "checkpoint_base_url_configured": bool(checkpoint_store.BASE_URL),
+        "translation": {
+            "sarvam_configured": has_sarvam,
+            "chrome_translator": "offscreen document — check chrome://on-device-translation-internals",
+        },
+        "version": "3.0",
     }

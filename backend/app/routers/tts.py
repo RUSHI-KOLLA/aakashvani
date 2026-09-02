@@ -106,9 +106,18 @@ async def prepare_checkpoint(req: PrepareRequest):
 
 
 @router.get("/tts/prepare/status")
-async def prepare_status():
-    st = checkpoint_store.status()
+async def prepare_status(lang: str | None = None):
+    # per-lang status when lang query is provided (concurrent downloads), else legacy global
+    if lang and lang in checkpoint_store.LANGS:
+        st = checkpoint_store.status(lang)
+    else:
+        st = checkpoint_store.status()
     st["checkpoint_available"] = checkpoint_store.available_languages()
     st["tts_loaded"] = iitm_tts.is_loaded()
     st["tts_current_lang"] = iitm_tts.current_language()
+    # expose full per-lang map for debugging
+    try:
+        st["all_status"] = checkpoint_store.status_all()
+    except Exception:
+        pass
     return st

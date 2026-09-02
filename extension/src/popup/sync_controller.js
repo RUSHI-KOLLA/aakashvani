@@ -15,11 +15,13 @@ class SyncController {
     this.LOOKAHEAD = 3;
     this._lastBanner = 0;
     this._lastErr = null;
+    this._generation = 0; // increments on seek/flush — stale inflight results are discarded
     // Drift bookkeeping — set when the current chunk starts
     this._playStartVideoTime = 0;
     this._playStartWallMs = 0;
     this._driftTimer = null;
     this._activeAudio = null;
+    this._activeItem = null;
 
     chrome.storage.local.get(['ducking', 'mode'], (s) => { this.settings = { ...this.settings, ...s }; });
     chrome.storage.onChanged.addListener((ch) => {
@@ -38,14 +40,17 @@ class SyncController {
     if (this.settings.mode === 'off') return;
     const t = text.trim();
     if (!t) return;
+    // Bounded queue: if video paused, queue could grow unbounded → cap at 8
+    const MAX_QUEUE = 8;
+    if (this.queue.length >= MAX_QUEUE) {
+      console.warn(`[AakashVani] queue full (${MAX_QUEUE}) — dropping oldest:`, this.queue[0]?.slice(0,40));
+      this.queue.shift();
+    }
     // Queue-level dedup: prevent same sentence enqueued multiple times while
     // still pending/inflight/playing (YouTube re-renders same caption on style changes)
     if (this.queue.includes(t)) return;
     if (this.inflight.some(p => p._aakashText === t)) return;
     if (this.playback.some(p => p._origText === t)) return;
-    // Superstring in queue would repeat words — if t is superstring of something
-    // already queued, replace the queued entry's text with t's delta? For now,
-    // just skip exact, prefix logic lives in content.js pendingText buffer.
     this.queue.push(t);
     this.pumpPipeline();
     this.tryPlayNext();
@@ -55,8 +60,14 @@ class SyncController {
     while (this.inflight.length < this.LOOKAHEAD && this.queue.length > 0) {
       const text = this.queue.shift();
       const originalText = text; // for skip logging
-      const p = this.processLine(text)
+      const gen = this._generation;
+      const p = this.processLine(text, gen)
         .then((audioBase64) => {
+          if (gen !== this._generation) {
+            console.log(`[AakashVani] stale segment discarded (seek/navigation): ${JSON.stringify(originalText).slice(0, 60)}`);
+            if (audioBase64) { try { const tmp = this.makeAudio(audioBase64); URL.revokeObjectURL(tmp.url); } catch(_){} }
+            return;
+          }
           if (audioBase64) {
             const item = this.makeAudio(audioBase64);
             item._origText = originalText;
@@ -66,6 +77,7 @@ class SyncController {
           this.tryPlayNext();
         })
         .catch((e) => {
+          if (gen !== this._generation) return null; // stale — already flushed, no log
           // Non-blocking: log exact server message, mark segment failed, never stall the pipeline
           const now = Date.now();
           if (!this._lastErr || this._lastErr.msg !== e.message || now - this._lastErr.t > 30000) {
@@ -86,7 +98,9 @@ class SyncController {
     }
   }
 
-  async processLine(rawText) {
+  async processLine(rawText, genAtStart) {
+    // Stale check: if generation changed while we were queued, abort early
+    if (genAtStart !== undefined && genAtStart !== this._generation) return null;
     // Background/offscreen pipeline always returns translated text (Chrome or cloud fallback).
     const settings = this.settings;
     let res;
@@ -99,10 +113,12 @@ class SyncController {
         apiKey: settings.apiKey || '',
       });
     } catch (e) {
+      if (genAtStart !== undefined && genAtStart !== this._generation) return null;
       // chrome.runtime.lastError or port closed — don't freeze queue
       console.warn(`[AakashVani] TRANSLATE transport error for ${JSON.stringify(rawText).slice(0, 60)}:`, e.message);
       return null;
     }
+    if (genAtStart !== undefined && genAtStart !== this._generation) return null;
     if (!res) {
       console.warn(`[AakashVani] TRANSLATE no response (reload extension) — skipping: ${JSON.stringify(rawText).slice(0, 60)}`);
       return null;
@@ -116,10 +132,12 @@ class SyncController {
     if (!translated) return null;
 
     // 2) TTS via service worker (IITM FastSpeech2) — pipelined ahead of playback
+    if (genAtStart !== undefined && genAtStart !== this._generation) return null;
     let tts;
     try {
       tts = await chrome.runtime.sendMessage({ type: 'TTS_ONLY', text: translated, language: settings.language || 'te-IN' });
     } catch (e) {
+      if (genAtStart !== undefined && genAtStart !== this._generation) return null;
       console.warn(`[AakashVani] TTS transport error for ${JSON.stringify(translated).slice(0, 60)}:`, e.message);
       return null;
     }
@@ -158,6 +176,7 @@ class SyncController {
     const audio = new Audio(url);
     audio.preload = 'auto';
     audio.preservesPitch = true; // keep pitch when we speed up for drift
+    audio._blobUrl = url;
     return { audio, url };
   }
 
@@ -168,6 +187,7 @@ class SyncController {
     const item = this.playback.shift();
     this.playing = true;
     this._activeAudio = item.audio;
+    this._activeItem = item;
     this._playStartVideoTime = v.currentTime;
     this._playStartWallMs = Date.now();
     // Reset rate for each new chunk
@@ -179,6 +199,7 @@ class SyncController {
     const done = () => {
       this._stopDriftMonitor();
       this._activeAudio = null;
+      this._activeItem = null;
       this.duck(false);
       // Guaranteed URL revoke — prevents blob memory leak
       try { URL.revokeObjectURL(item.url); } catch (_) {}
@@ -220,6 +241,28 @@ class SyncController {
     if (this._driftTimer) { clearInterval(this._driftTimer); this._driftTimer = null; }
   }
 
+  pauseDubbed() {
+    if (this._activeAudio && !this._activeAudio.paused) {
+      try { this._activeAudio.pause(); } catch(_) {}
+      this._stopDriftMonitor();
+      console.log('[AakashVani] dub paused (video paused)');
+    }
+  }
+
+  resumeDubbed() {
+    const v = this.video || document.querySelector('video');
+    if (!v || v.paused) return;
+    if (this._activeAudio && this._activeAudio.paused && this.playing) {
+      this._activeAudio.play().catch(()=>{});
+      this._playStartWallMs = Date.now() - (this._activeAudio.currentTime * 1000);
+      this._playStartVideoTime = v.currentTime - this._activeAudio.currentTime;
+      this._startDriftMonitor(this._activeAudio);
+      console.log('[AakashVani] dub resumed');
+    } else {
+      this.tryPlayNext();
+    }
+  }
+
   duck(on) {
     const v = this.video || document.querySelector('video');
     if (!v) return;
@@ -233,17 +276,22 @@ class SyncController {
   }
 
   flush() {
+    this._generation++;
     this._stopDriftMonitor();
-    this._activeAudio = null;
-    // Stop any currently playing chunk and revoke its blob
-    if (this.playing && this.playback.length >= 0) {
-      // playing item URL is held by _activeAudio — already handled by done()
+    // Stop active dubbed audio immediately — never let stale audio survive seek/navigation/pause
+    if (this._activeAudio) {
+      try { this._activeAudio.pause(); this._activeAudio.src = ''; } catch(_) {}
+      try { if (this._activeItem && this._activeItem.url) URL.revokeObjectURL(this._activeItem.url); else if (this._activeAudio._blobUrl) URL.revokeObjectURL(this._activeAudio._blobUrl); } catch(_) {}
     }
+    this._activeAudio = null;
+    this._activeItem = null;
     this.queue = [];
+    // Cancel any buffered audio
     this.playback.forEach((i) => {
       try { i.audio.pause(); i.audio.src = ''; URL.revokeObjectURL(i.url); } catch (_) {}
     });
     this.playback = [];
+    // Inflight promises are now stale — they check _generation before pushing to playback
     this.playing = false;
     this.duck(false);
   }

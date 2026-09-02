@@ -22,9 +22,19 @@
   function readCaptionRaw() {
     const segs = document.querySelectorAll('.ytp-caption-segment');
     if (segs.length) return Array.from(segs).map((s) => s.textContent.trim()).join(' ').trim();
-    // Fallback: YouTube sometimes renders a single window without segments
     const win = document.querySelector('.ytp-caption-window-container .caption-visual-line');
     if (win) return (win.textContent || '').trim();
+    // Robust fallback: WebVTT textTracks (survives YouTube DOM redesign)
+    try {
+      const v = document.querySelector('video');
+      if (v && v.textTracks) {
+        for (const tr of v.textTracks) {
+          if (tr.mode === 'showing' && tr.activeCues && tr.activeCues.length) {
+            return Array.from(tr.activeCues).map(c => c.text.trim()).join(' ').trim();
+          }
+        }
+      }
+    } catch (_) {}
     return '';
   }
 
@@ -95,7 +105,8 @@
         clearTimeout(debounce);
         controller.flush();
       });
-      v.addEventListener('play', () => controller.tryPlayNext?.());
+      v.addEventListener('pause', () => controller.pauseDubbed?.());
+      v.addEventListener('play', () => controller.resumeDubbed?.());
     }
   }
 

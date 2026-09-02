@@ -118,8 +118,16 @@ function bindEvents() {
     els.volVal.textContent = `${els.ducking.value}%`;
     saveSetting('ducking', Number(els.ducking.value));
   });
+  function isValidEngineUrl(v) {
+    try { const u = new URL(v); return u.protocol === 'http:' || u.protocol === 'https:'; } catch { return false; }
+  }
   els.engineUrl.addEventListener('change', () => {
-    saveSetting('engineUrl', els.engineUrl.value);
+    const v = els.engineUrl.value.trim();
+    if (v && !isValidEngineUrl(v)) {
+      showWarning('Engine URL must be http(s)://host:port — e.g. http://127.0.0.1:8000');
+      return;
+    }
+    saveSetting('engineUrl', v || DEFAULTS.engineUrl);
     checkServer();
   });
   chrome.runtime.onMessage.addListener((msg) => {

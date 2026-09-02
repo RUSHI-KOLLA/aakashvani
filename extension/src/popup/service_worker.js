@@ -22,21 +22,37 @@ async function getSettings() {
 
 async function getEngineUrl() {
   const { engineUrl } = await chrome.storage.local.get('engineUrl');
-  return engineUrl || DEFAULT_ENGINE;
+  const url = (engineUrl || DEFAULT_ENGINE).trim();
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('bad protocol');
+    return url;
+  } catch {
+    console.warn('[AakashVani] invalid engineUrl, falling back to', DEFAULT_ENGINE);
+    return DEFAULT_ENGINE;
+  }
 }
 
-// ---- Offscreen document lifecycle ----
+// ---- Offscreen document lifecycle (race-safe) ----
+let _offscreenCreating = null;
 async function ensureOffscreenDocument() {
-  // chrome.offscreen.hasDocument() is async in MV3
-  const existing = await chrome.offscreen.hasDocument().catch(() => false);
-  if (existing) return;
-  await chrome.offscreen.createDocument({
-    url: OFFSCREEN_PATH,
-    reasons: ['DOM_PARSER'],
-    justification: 'Chrome Translator API requires page context (not available in service workers)',
-  });
-  // Small delay for the document to initialize
-  await new Promise((r) => setTimeout(r, 200));
+  if (await chrome.offscreen.hasDocument().catch(() => false)) return;
+  if (_offscreenCreating) { await _offscreenCreating.catch(()=>{}); return; }
+  _offscreenCreating = (async () => {
+    if (await chrome.offscreen.hasDocument().catch(() => false)) return;
+    try {
+      await chrome.offscreen.createDocument({
+        url: OFFSCREEN_PATH,
+        reasons: ['DOM_PARSER'],
+        justification: 'Chrome Translator API requires page context (not available in service workers)',
+      });
+      await new Promise((r) => setTimeout(r, 250));
+    } catch (e) {
+      // "Only a single offscreen document" — another caller won the race, ignore
+      if (!String(e.message).includes('single offscreen')) throw e;
+    }
+  })();
+  try { await _offscreenCreating; } finally { _offscreenCreating = null; }
 }
 
 // ---- Route translation to offscreen document ----
