@@ -50,7 +50,7 @@ _DEFAULT_STATE = {"status": "idle", "lang": None, "progress": 0.0, "downloaded":
 _states: dict[str, dict] = {}
 # Global legacy alias for callers expecting single _state (points at currently downloading lang)
 _state = dict(_DEFAULT_STATE)
-_lock = threading.Lock()
+_lock = threading.RLock()  # RLock allows re-entrant locking from same thread
 
 def _get_state(lang: str) -> dict:
     with _lock:
@@ -67,6 +67,16 @@ def _update_state(lang: str, **kw) -> None:
         st.update(kw)
         # keep legacy global in sync with the most recently active lang (for old /status callers)
         _state.update(st)
+
+def _update_state_unlocked(lang: str, **kw) -> None:
+    """Internal helper that updates state WITHOUT acquiring the lock.
+    Caller MUST hold _lock."""
+    st = _states.get(lang)
+    if st is None:
+        st = dict(_DEFAULT_STATE, lang=lang)
+        _states[lang] = st
+    st.update(kw)
+    _state.update(st)
 
 
 def lang_code(lang: str) -> str:
@@ -153,8 +163,9 @@ def _download_file(repo_path: str, dest: Path, counters: dict, lang: str) -> Non
     tmp = dest.with_suffix(dest.suffix + ".part")
     req = urllib.request.Request(_url(repo_path), headers=_auth_headers())
     with urllib.request.urlopen(req, timeout=60) as resp:
+        # Use pre-computed size from _prepare_sizes as authoritative total
+        # Don't add to counters["total"] again - it was pre-computed in _prepare_sizes
         size = int(resp.headers.get("Content-Length") or 0)
-        counters["total"] += size
         with open(tmp, "wb") as f:
             while True:
                 chunk = resp.read(1 << 20)
@@ -243,6 +254,6 @@ def prepare(lang: str) -> dict:
         st = _states.get(lang)
         if st and st.get("status") in ("downloading", "extracting"):
             return {"ok": True, "status": st["status"], "already_running": True}
-        _update_state(lang, status="downloading")
+        _update_state_unlocked(lang, status="downloading")
         threading.Thread(target=_worker, args=(lang,), daemon=True).start()
     return {"ok": True, "status": "started"}

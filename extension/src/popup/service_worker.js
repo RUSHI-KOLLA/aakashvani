@@ -84,17 +84,9 @@ async function synthesizeSpeech(text, language) {
     const err = await res.json().catch(() => ({}));
     const detail = err.detail || {};
     if (detail.checkpoint_missing) {
-      const prepared = await prepareCheckpoint(detail.checkpoint_missing);
-      if (!prepared.ok) throw new Error(prepared.error || 'checkpoint download failed');
-      const retry = await fetch(`${engine}/api/v1/tts`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!retry.ok) throw new Error(`tts after prepare ${retry.status}`);
-      const data = await retry.json();
-      if (!data.audio_base64) throw new Error(data.detail || 'no audio after prepare');
-      return data;
+      // Don't block - start background preparation and return error immediately
+      prepareCheckpoint(detail.checkpoint_missing).catch(() => {});
+      throw new Error(`checkpoint_preparing:${detail.checkpoint_missing}`);
     }
     throw new Error(`tts 503: ${JSON.stringify(detail).slice(0, 200)}`);
   }
@@ -115,7 +107,8 @@ async function prepareCheckpoint(lang) {
   if (!start.ok) return { ok: false, error: startData.detail || `prepare ${start.status}` };
   for (let i = 0; i < 300; i++) {
     await new Promise((r) => setTimeout(r, 2000));
-    const st = await fetch(`${engine}/api/v1/tts/prepare/status`).then((r) => r.json()).catch(() => null);
+    // Request per-language status so concurrent downloads don't clobber each other
+    const st = await fetch(`${engine}/api/v1/tts/prepare/status?lang=${encodeURIComponent(lang)}`).then((r) => r.json()).catch(() => null);
     if (!st) continue;
     chrome.runtime.sendMessage({ type: 'CHECKPOINT_PROGRESS', lang, status: st.status, progress: st.progress, error: st.error }).catch(() => {});
     if (st.status === 'ready') return { ok: true };

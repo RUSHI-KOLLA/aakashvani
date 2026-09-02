@@ -1,14 +1,151 @@
-// AakashVani sync controller — pipelined audio queue with playback drift compensation.
+// AakashVani sync controller — timeline-based audio synchronization.
 // Translation + TTS for segment N+1 overlap while segment N is playing.
-// If audio lags behind the video (>400 ms), playbackRate is raised to 1.05–1.25×
-// (uniform time-stretch, browser keeps pitch-correction) so the dub catches up.
+// Timeline scheduler synchronizes audio segments to YouTube video timeline.
+
+class TimelineScheduler {
+  constructor() {
+    this.segments = []; // { caption, audio, targetStart, targetEnd, state: 'pending'|'ready'|'playing'|'completed'|'discarded' }
+    this.currentIndex = 0;
+    this.video = null;
+    this._monitorTimer = null;
+  }
+
+  setVideo(video) { this.video = video; }
+
+  // Add a new segment with target timing from caption
+  addSegment(caption, audioBase64) {
+    const targetStart = caption.startTime || 0;
+    const targetEnd = caption.endTime || (caption.startTime + caption.duration) || 0;
+    const audio = this._createAudio(audioBase64);
+    this.segments.push({
+      caption,
+      audio,
+      targetStart,
+      targetEnd,
+      state: 'ready',
+      scheduledAt: null,
+    });
+  }
+
+  _createAudio(base64) {
+    const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
+    const audio = new Audio(url);
+    audio.preload = 'auto';
+    audio.preservesPitch = true;
+    audio._blobUrl = url;
+    return audio;
+  }
+
+  // Main scheduler tick - called periodically to advance timeline
+  tick() {
+    if (!this.video || this.video.paused) return;
+    const now = this.video.currentTime;
+
+    // Advance currentIndex past completed segments
+    while (this.currentIndex < this.segments.length) {
+      const seg = this.segments[this.currentIndex];
+      if (seg.state === 'completed') {
+        this.currentIndex++;
+        continue;
+      }
+      // If segment is ready and we've reached its start time, play it
+      if (seg.state === 'ready' && now >= seg.targetStart - 0.1) { // small lead-in
+        this._playSegment(this.currentIndex);
+      }
+      break;
+    }
+
+    // Discard stale segments that are far behind
+    while (this.currentIndex < this.segments.length) {
+      const seg = this.segments[this.currentIndex];
+      if (seg.state === 'ready' && now > seg.targetEnd + 2.0) { // 2s grace period after end
+        console.log(`[AakashVani] discarding stale segment: ${seg.caption.text.slice(0,40)}`);
+        seg.state = 'discarded';
+        this._cleanupSegment(seg);
+        this.currentIndex++;
+      } else if (seg.state === 'playing' && now > seg.targetEnd + 1.0) {
+        // Segment playing but past its end - let it finish naturally or force stop
+        if (seg.audio.currentTime >= seg.audio.duration - 0.1) {
+          seg.state = 'completed';
+          this._cleanupSegment(seg);
+          this.currentIndex++;
+        }
+      } else {
+        break;
+      }
+    }
+  }
+
+  _playSegment(index) {
+    const seg = this.segments[index];
+    if (seg.state !== 'ready') return;
+    
+    seg.state = 'playing';
+    seg.scheduledAt = Date.now();
+    seg.audio.playbackRate = 1.0;
+    seg.audio.preservesPitch = true;
+    
+    const done = () => {
+      seg.state = 'completed';
+      try { URL.revokeObjectURL(seg.audio._blobUrl); } catch(_) {}
+      this.tick(); // check for next segment
+    };
+    seg.audio.onended = done;
+    seg.audio.onerror = done;
+    seg.audio.play().catch(done);
+    console.log(`[AakashVani] playing segment @ ${seg.targetStart.toFixed(2)}s: ${seg.caption.text.slice(0,40)}`);
+  }
+
+  _cleanupSegment(seg) {
+    try { 
+      seg.audio.pause(); 
+      seg.audio.src = ''; 
+      URL.revokeObjectURL(seg.audio._blobUrl); 
+    } catch(_) {}
+  }
+
+  // Check if we should adjust playback rate for drift
+  checkDrift() {
+    if (!this.video || this.currentIndex >= this.segments.length) return;
+    const seg = this.segments[this.currentIndex];
+    if (seg.state !== 'playing' || !this.video || this.video.paused) return;
+    
+    const now = this.video.currentTime;
+    const audioProgress = seg.audio.currentTime;
+    const expectedProgress = now - seg.targetStart;
+    const drift = expectedProgress - audioProgress; // positive = audio behind
+    
+    let targetRate = 1.0;
+    if (drift > 0.9) targetRate = 1.25;
+    else if (drift > 0.65) targetRate = 1.15;
+    else if (drift > 0.4) targetRate = 1.05;
+    else if (drift < -0.5) targetRate = 0.95; // audio ahead - slow down slightly
+    
+    if (Math.abs(seg.audio.playbackRate - targetRate) > 0.02) {
+      seg.audio.playbackRate = targetRate;
+      if (targetRate !== 1.0) console.log(`[AakashVani] drift ${drift.toFixed(2)}s → ${targetRate}x`);
+    }
+  }
+
+  clear() {
+    if (this._monitorTimer) { clearInterval(this._monitorTimer); this._monitorTimer = null; }
+    this.segments.forEach(s => this._cleanupSegment(s));
+    this.segments = [];
+    this.currentIndex = 0;
+  }
+}
+
+// AakashVani sync controller — timeline-based audio synchronization.
+// Translation + TTS for segment N+1 overlap while segment N is playing.
+// Timeline scheduler synchronizes audio segments to YouTube video timeline.
 
 class SyncController {
   constructor() {
     this.settings = { ducking: 10, mode: 'auto' };
     this.queue = [];
     this.inflight = [];
-    this.playback = [];
+    this.playback = []; // legacy, kept for compatibility
     this.playing = false;
     this.video = null;
     this.prevVolume = null;
@@ -16,12 +153,9 @@ class SyncController {
     this._lastBanner = 0;
     this._lastErr = null;
     this._generation = 0; // increments on seek/flush — stale inflight results are discarded
-    // Drift bookkeeping — set when the current chunk starts
-    this._playStartVideoTime = 0;
-    this._playStartWallMs = 0;
-    this._driftTimer = null;
-    this._activeAudio = null;
-    this._activeItem = null;
+    
+    // New timeline-based scheduler
+    this.scheduler = new TimelineScheduler();
 
     chrome.storage.local.get(['ducking', 'mode'], (s) => { this.settings = { ...this.settings, ...s }; });
     chrome.storage.onChanged.addListener((ch) => {
@@ -33,35 +167,44 @@ class SyncController {
     });
   }
 
-  attach(videoEl) { this.video = videoEl; }
+  attach(videoEl) { 
+    this.video = videoEl;
+    this.scheduler.setVideo(videoEl);
+  }
 
-  enqueue(text) {
-    if (!text) return;
+  enqueue(caption) {
+    if (!caption) return;
     if (this.settings.mode === 'off') return;
-    const t = text.trim();
-    if (!t) return;
+    // Handle both old string format and new caption object
+    const text = typeof caption === 'string' ? caption.trim() : (caption.text || '').trim();
+    if (!text) return;
+    
     // Bounded queue: if video paused, queue could grow unbounded → cap at 8
     const MAX_QUEUE = 8;
     if (this.queue.length >= MAX_QUEUE) {
-      console.warn(`[AakashVani] queue full (${MAX_QUEUE}) — dropping oldest:`, this.queue[0]?.slice(0,40));
+      console.warn(`[AakashVani] queue full (8) — dropping oldest:`, this.queue[0]?.text?.slice(0,40) || this.queue[0]?.slice(0,40));
       this.queue.shift();
     }
     // Queue-level dedup: prevent same sentence enqueued multiple times while
     // still pending/inflight/playing (YouTube re-renders same caption on style changes)
-    if (this.queue.includes(t)) return;
-    if (this.inflight.some(p => p._aakashText === t)) return;
-    if (this.playback.some(p => p._origText === t)) return;
-    this.queue.push(t);
+    const isDuplicate = this.queue.some(q => (typeof q === 'string' ? q : q.text) === text) ||
+                       this.inflight.some(p => p._aakashText === text) ||
+                       this.scheduler.segments.some(s => s.state === 'ready' && s.caption.text === text);
+    if (isDuplicate) return;
+    
+    // Store the full caption object in queue for timing info
+    this.queue.push(caption);
     this.pumpPipeline();
-    this.tryPlayNext();
+    this.scheduler.tick();
   }
 
   pumpPipeline() {
     while (this.inflight.length < this.LOOKAHEAD && this.queue.length > 0) {
-      const text = this.queue.shift();
+      const caption = this.queue.shift();
+      const text = typeof caption === 'string' ? caption.trim() : (caption.text || '').trim();
       const originalText = text; // for skip logging
       const gen = this._generation;
-      const p = this.processLine(text, gen)
+      const p = this.processLine(caption, gen)
         .then((audioBase64) => {
           if (gen !== this._generation) {
             console.log(`[AakashVani] stale segment discarded (seek/navigation): ${JSON.stringify(originalText).slice(0, 60)}`);
@@ -69,12 +212,9 @@ class SyncController {
             return;
           }
           if (audioBase64) {
-            const item = this.makeAudio(audioBase64);
-            item._origText = originalText;
-            this.playback.push(item);
+            this.scheduler.addSegment(caption, audioBase64);
+            this.scheduler.tick();
           } else console.log(`[AakashVani] segment skipped (no audio): ${JSON.stringify(originalText).slice(0, 80)}`);
-          // Segment N+1 is now ready while N may still be playing — overlaps
-          this.tryPlayNext();
         })
         .catch((e) => {
           if (gen !== this._generation) return null; // stale — already flushed, no log
@@ -98,11 +238,14 @@ class SyncController {
     }
   }
 
-  async processLine(rawText, genAtStart) {
+  async processLine(caption, genAtStart) {
     // Stale check: if generation changed while we were queued, abort early
     if (genAtStart !== undefined && genAtStart !== this._generation) return null;
     // Background/offscreen pipeline always returns translated text (Chrome or cloud fallback).
     const settings = this.settings;
+    // Extract text from caption object or string
+    const rawText = typeof caption === 'string' ? caption.trim() : (caption.text || '').trim();
+    if (!rawText) return null;
     let res;
     try {
       res = await chrome.runtime.sendMessage({
@@ -147,6 +290,13 @@ class SyncController {
     }
     if (!tts.ok) {
       // Exact TTS server error (500→503 mapping) — log and skip cleanly
+      const errMsg = tts.error || '';
+      if (errMsg.startsWith('checkpoint_preparing:')) {
+        const missingLang = errMsg.split(':')[1];
+        console.warn(`[AakashVani] TTS checkpoint preparing for ${missingLang} — skipping segment`);
+        this.showBanner(`Voice for ${missingLang} is preparing — skipping this segment`);
+        return null; // Skip this segment, don't retry
+      }
       console.warn(`[AakashVani] TTS failed (server ${tts.error?.slice(0, 200)}) | text=${JSON.stringify(translated).slice(0, 80)} — skipping to next segment`);
       throw new Error(tts.error);
     }
@@ -180,86 +330,41 @@ class SyncController {
     return { audio, url };
   }
 
+  // Legacy method - now delegates to scheduler
   tryPlayNext() {
-    if (this.playing || this.playback.length === 0) return;
-    const v = this.video || document.querySelector('video');
-    if (!v || v.paused) return;
-    const item = this.playback.shift();
-    this.playing = true;
-    this._activeAudio = item.audio;
-    this._activeItem = item;
-    this._playStartVideoTime = v.currentTime;
-    this._playStartWallMs = Date.now();
-    // Reset rate for each new chunk
-    item.audio.playbackRate = 1.0;
-    item.audio.preservesPitch = true;
-    this.duck(true);
-    this._startDriftMonitor(item.audio);
-
-    const done = () => {
-      this._stopDriftMonitor();
-      this._activeAudio = null;
-      this._activeItem = null;
-      this.duck(false);
-      // Guaranteed URL revoke — prevents blob memory leak
-      try { URL.revokeObjectURL(item.url); } catch (_) {}
-      this.playing = false;
-      this.tryPlayNext();
-    };
-    item.audio.onended = done;
-    item.audio.onerror = done;
-    item.audio.play().catch(done);
+    this.scheduler.tick();
+    this.scheduler.checkDrift();
   }
 
   _startDriftMonitor(audio) {
-    this._stopDriftMonitor();
-    // Check every 300 ms whether the audio has fallen behind the video
-    this._driftTimer = setInterval(() => {
-      const v = this.video || document.querySelector('video');
-      if (!v || v.paused || !this.playing || !audio) return;
-      const wallElapsedMs = Date.now() - this._playStartWallMs;
-      // How far the video has actually advanced since we started this chunk
-      const videoElapsedMs = (v.currentTime - this._playStartVideoTime) * 1000;
-      // Audio progress (seconds → ms) already played for this chunk
-      const audioElapsedMs = audio.currentTime * 1000;
-      // Positive drift → audio is behind video
-      const driftMs = videoElapsedMs - audioElapsedMs;
-
-      let targetRate = 1.0;
-      if (driftMs > 900) targetRate = 1.25;
-      else if (driftMs > 650) targetRate = 1.15;
-      else if (driftMs > 400) targetRate = 1.05;
-
-      if (audio.playbackRate !== targetRate) {
-        audio.playbackRate = targetRate;
-        if (targetRate > 1.0) console.log(`[AakashVani] drift ${driftMs.toFixed(0)}ms → ${targetRate}x (wall ${wallElapsedMs.toFixed(0)}ms)`);
-      }
+    this.scheduler._monitorTimer = setInterval(() => {
+      this.scheduler.checkDrift();
     }, 300);
   }
 
   _stopDriftMonitor() {
-    if (this._driftTimer) { clearInterval(this._driftTimer); this._driftTimer = null; }
+    if (this.scheduler._monitorTimer) { clearInterval(this.scheduler._monitorTimer); this.scheduler._monitorTimer = null; }
   }
 
   pauseDubbed() {
-    if (this._activeAudio && !this._activeAudio.paused) {
-      try { this._activeAudio.pause(); } catch(_) {}
-      this._stopDriftMonitor();
+    if (this.scheduler.segments[this.scheduler.currentIndex]?.audio && !this.scheduler.segments[this.scheduler.currentIndex]?.audio.paused) {
+      try { this.scheduler.segments[this.scheduler.currentIndex].audio.pause(); } catch(_) {}
+      this.scheduler._stopDriftMonitor();
       console.log('[AakashVani] dub paused (video paused)');
     }
   }
 
   resumeDubbed() {
-    const v = this.video || document.querySelector('video');
-    if (!v || v.paused) return;
-    if (this._activeAudio && this._activeAudio.paused && this.playing) {
-      this._activeAudio.play().catch(()=>{});
-      this._playStartWallMs = Date.now() - (this._activeAudio.currentTime * 1000);
-      this._playStartVideoTime = v.currentTime - this._activeAudio.currentTime;
-      this._startDriftMonitor(this._activeAudio);
+    const seg = this.scheduler.segments[this.scheduler.currentIndex];
+    if (!seg || seg.audio.paused && !seg.video.paused) {
+      seg.audio.play().catch(()=>{});
+      // Recalculate timing
+      this.scheduler._playStartWallMs = Date.now() - (seg.audio.currentTime * 1000);
+      this.scheduler._playStartVideoTime = this.video.currentTime - seg.audio.currentTime;
+      this._startDriftMonitor(seg.audio);
       console.log('[AakashVani] dub resumed');
     } else {
-      this.tryPlayNext();
+      this.scheduler.tick();
     }
   }
 
@@ -279,19 +384,19 @@ class SyncController {
     this._generation++;
     this._stopDriftMonitor();
     // Stop active dubbed audio immediately — never let stale audio survive seek/navigation/pause
-    if (this._activeAudio) {
-      try { this._activeAudio.pause(); this._activeAudio.src = ''; } catch(_) {}
-      try { if (this._activeItem && this._activeItem.url) URL.revokeObjectURL(this._activeItem.url); else if (this._activeAudio._blobUrl) URL.revokeObjectURL(this._activeAudio._blobUrl); } catch(_) {}
+    if (this.scheduler._activeAudio) {
+      try { this.scheduler._activeAudio.pause(); this.scheduler._activeAudio.src = ''; } catch(_) {}
+      try { if (this.scheduler._activeItem && this.scheduler._activeItem.url) URL.revokeObjectURL(this.scheduler._activeItem.url); else if (this.scheduler._activeAudio._blobUrl) URL.revokeObjectURL(this.scheduler._activeAudio._blobUrl); } catch(_) {}
     }
-    this._activeAudio = null;
-    this._activeItem = null;
+    this.scheduler._activeAudio = null;
+    this.scheduler._activeItem = null;
     this.queue = [];
     // Cancel any buffered audio
-    this.playback.forEach((i) => {
+    this.scheduler.segments.forEach((i) => {
       try { i.audio.pause(); i.audio.src = ''; URL.revokeObjectURL(i.url); } catch (_) {}
     });
-    this.playback = [];
-    // Inflight promises are now stale — they check _generation before pushing to playback
+    this.scheduler.segments = [];
+    this.scheduler.currentIndex = 0;
     this.playing = false;
     this.duck(false);
   }
