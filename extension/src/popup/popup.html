@@ -35,6 +35,7 @@
         .section-title { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin: 16px 0 8px; border-top: 1px solid #1e293b; padding-top: 12px; }
         .header { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
         .header svg { flex-shrink: 0; }
+        .hint { font-size: 11px; color: #64748b; margin: -8px 0 12px; }
     </style>
 </head>
 <body>
@@ -67,8 +68,9 @@
         <div>
             <select id="mode">
                 <option value="off">Off — Disabled</option>
-                <option value="auto" selected>Auto (Chrome Translate + Local IITM TTS)</option>
+                <option value="auto" selected>Auto (Free: GTX + Local TTS)</option>
                 <option value="edge">Edge (Chrome Translate + Local IITM TTS)</option>
+                <option value="cloud">Cloud (Sarvam, BYOK, Paid)</option>
             </select>
         </div>
     </div>
@@ -82,6 +84,19 @@
         <option value="ml-IN">Malayalam</option>
         <option value="mr-IN">Marathi</option>
     </select>
+
+    <div class="section-title">Sarvam API (Cloud Mode)</div>
+    <label>API Key</label>
+    <input type="password" id="api-key" placeholder="Paste your Sarvam API key">
+    <p class="hint">Get key at dashboard.sarvam.ai — used for cloud translation</p>
+
+    <label style="display:flex; align-items:center; gap:8px; text-transform:none; letter-spacing:0; margin-bottom:12px; font-weight:500; color:#e2e8f0">
+        <input type="checkbox" id="cloud-fallback" style="width:auto; margin:0">
+        Allow paid cloud fallback when edge fails
+    </label>
+
+    <label>Engine URL</label>
+    <input type="text" id="engine-url" value="http://127.0.0.1:8000" placeholder="http://127.0.0.1:8000">
 
     <div class="section-title">Audio</div>
     <div class="slider-wrap">

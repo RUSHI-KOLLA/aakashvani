@@ -1,17 +1,18 @@
-"""AakashVani local engine — minimal FastAPI entrypoint.
+"""AakashVani local engine — FastAPI entrypoint.
 
 Endpoints:
   GET  /api/v1/health    liveness + IITM TTS load report
+  POST /api/v1/translate translation via Sarvam cloud (BYOK)
   POST /api/v1/tts       speech synthesis (IITM FastSpeech2 + HiFi-GAN)
-  POST /api/v1/chat      (chrome built-in translation only, calls /tts)
 
-NOTE: NMT/translation now happens INSIDE the Chrome extension via Chrome's
-built-in on-device Translator API ("GTX" mode) — the backend does not do
-translation and no NMT weights (NLLB/others) are loaded or stored here.
+Translation:
+  - cloud mode: POST /api/v1/translate via Sarvam AI (requires SARVAM_API_KEY)
+  - edge mode:  Chrome built-in Translator API (in extension, no backend call)
 
 Run: uvicorn app.main:app --host 127.0.0.1 --port 8000  (from ./venv)
 """
 import os
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -19,12 +20,21 @@ from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()  # reads backend/.env when run outside containers
 
-from app.routers import tts  # noqa: E402  (after dotenv)
+from app.routers import translate, tts  # noqa: E402  (after dotenv)
 
 HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "8000"))
 
-app = FastAPI(title="AakashVani Local Engine", version="3.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    from app.services import iitm_tts
+    await iitm_tts.startup()
+    yield
+    iitm_tts.shutdown()
+
+
+app = FastAPI(title="AakashVani Local Engine", version="3.0", lifespan=lifespan)
 
 # Chrome extensions send Origin: chrome-extension://<id>; MV3 fetches from the
 # popup/content script need permissive CORS since the origin is opaque.
@@ -35,14 +45,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(translate.router)
 app.include_router(tts.router)
-
-
-@app.on_event("startup")
-async def _startup():
-    from app.services import iitm_tts
-
-    await iitm_tts.startup()  # preload FastSpeech2 checkpoint off the request path
 
 
 @app.get("/")

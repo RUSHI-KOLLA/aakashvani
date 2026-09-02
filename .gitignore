@@ -44,3 +44,6 @@ Thumbs.db
 
 # --- HF cache if ever local ---
 hf_cache/
+
+# --- IITM tts temp dicts ---
+backend/third_party/iitm_indic_tts/tmp/
