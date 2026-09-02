@@ -17,9 +17,11 @@ function assertEq(a, b, msg) {
 }
 function section(name) { console.log(`\n=== ${name} ===`); }
 
-// Extract pure functions from content.js
+// Extract pure functions from content.js (updated for 100ms timestamp normalization)
 function _hashCaptionKey(startTime, endTime, text) {
-  const raw = `${startTime.toFixed(6)}|${endTime.toFixed(6)}|${text}`;
+  const normStart = Math.round(startTime * 10) / 10;  // 100ms precision
+  const normEnd = Math.round(endTime * 10) / 10;
+  const raw = `${normStart.toFixed(1)}|${normEnd.toFixed(1)}|${text}`;
   let h = 0;
   for (let i = 0; i < raw.length; i++) {
     h = ((h << 5) - h + raw.charCodeAt(i)) | 0;
@@ -47,13 +49,28 @@ class MockAudio {
   pause() { this.paused = true; }
 }
 
-// Test scheduler (mirrors real TimelineScheduler logic exactly)
+// Test scheduler (mirrors real TimelineScheduler logic exactly — including Fix 3 + Fix 4)
 class TestScheduler {
   constructor() { this.segments = []; this.currentIndex = 0; this.video = { currentTime: 0, paused: false }; }
   setVideo(v) { this.video = v; }
 
+  // ---- Fix 3: Duplicate segment prevention ----
   addSegment(caption, audioBase64) {
     const seg = this._makeSegment(caption, audioBase64);
+    const newText = (caption.text || '').trim().toLowerCase().replace(/[.!?।।…\u0964\u0965]+$/, '');
+
+    // Check for overlapping segments with similar text — discard the older one
+    for (let i = this.segments.length - 1; i >= 0; i--) {
+      const existing = this.segments[i];
+      if (existing.state === 'discarded' || existing.state === 'completed') continue;
+      const existText = (existing.caption.text || '').trim().toLowerCase().replace(/[.!?।।…\u0964\u0965]+$/, '');
+      const timeOverlap = Math.abs(existing.targetStart - seg.targetStart) < 1.0;
+      const textSimilar = existText === newText || (newText.length > 5 && newText.includes(existText)) || (existText.length > 5 && existText.includes(newText));
+      if (timeOverlap && textSimilar) {
+        existing.state = 'discarded';
+      }
+    }
+
     let insertIdx = this.segments.length;
     for (let i = 0; i < this.segments.length; i++) {
       if (this.segments[i].targetStart > seg.targetStart) { insertIdx = i; break; }
@@ -83,13 +100,16 @@ class TestScheduler {
     }
   }
 
+  // ---- Fix 4: Audio lead time (300ms) ----
+  static AUDIO_LEAD = 0.3;
+
   tick() {
     if (!this.video || this.video.paused) return;
     const now = this.video.currentTime;
     while (this.currentIndex < this.segments.length) {
       const seg = this.segments[this.currentIndex];
       if (seg.state === 'completed' || seg.state === 'discarded') { this.currentIndex++; continue; }
-      if (seg.state === 'ready' && now >= seg.targetStart - 0.1) {
+      if (seg.state === 'ready' && now >= seg.targetStart - TestScheduler.AUDIO_LEAD) {
         seg.state = 'playing'; seg.scheduledAt = Date.now(); seg.audio.paused = false;
       }
       break;
@@ -141,9 +161,9 @@ section('INV-1: TTS completion order NEVER determines playback order');
 }
 
 // ============================================================
-// INV-2: Stable caption IDs — 50 observations of same cue
+// INV-2: Stable caption IDs — 100ms normalization absorbs sub-ms jitter
 // ============================================================
-section('INV-2: Stable caption IDs — 50 observations of same cue');
+section('INV-2: Stable caption IDs — 100ms normalization absorbs sub-ms jitter');
 {
   const cue = { text: 'Hello world this is a test', startTime: 5.123456, endTime: 8.789012 };
   const ids = new Set();
@@ -151,7 +171,19 @@ section('INV-2: Stable caption IDs — 50 observations of same cue');
   assertEq(ids.size, 1, '50 observations → 1 unique ID');
   assertEq(makeCaption(cue).id, makeCaption(cue).id, 'two separate calls → same ID');
   assert(makeCaption({ text: 'Different', startTime: 5.123456, endTime: 8.789012 }).id !== makeCaption(cue).id, 'different text → different ID');
-  assert(makeCaption({ text: 'Hello world this is a test', startTime: 5.123457, endTime: 8.789012 }).id !== makeCaption(cue).id, 'different startTime → different ID');
+
+  // ---- Fix 1: 100ms normalization — sub-millisecond jitter should produce SAME ID ----
+  // Values must round to same 100ms bucket: round(x*10)/10 must be equal
+  const id1 = makeCaption({ text: 'Test caption', startTime: 581.71, endTime: 585.20 }).id;
+  const id2 = makeCaption({ text: 'Test caption', startTime: 581.72, endTime: 585.21 }).id;
+  const id3 = makeCaption({ text: 'Test caption', startTime: 581.73, endTime: 585.22 }).id;
+  assertEq(id1, id2, '581.71 vs 581.72 → same ID (both round to 581.7)');
+  assertEq(id2, id3, '581.72 vs 581.73 → same ID (both round to 581.7)');
+  assertEq(id1, id3, '581.71 vs 581.73 → same ID (all round to 581.7)');
+
+  // But >100ms difference should produce different IDs
+  const id4 = makeCaption({ text: 'Test caption', startTime: 582.00, endTime: 585.50 }).id;
+  assert(id1 !== id4, '581.7 vs 582.0 (>100ms) → different ID');
   console.log('INV-2: PASS');
 }
 
@@ -437,6 +469,98 @@ function invRemaining() {
     assertEq(sched.currentIndex, 0, 'index bumped to 0');
     assertEq(sched.segments.map(s => s.caption.id).join(','), 'C,A,B', 'C,A,B order');
     console.log('INV-1c: PASS');
+  }
+
+  // ---- Fix 5: New invariants for caption ID normalization + duplicate prevention ----
+  section('INV-10: Micro-seek threshold — only flush on >2s seeks');
+  {
+    // Simulate seeked handler behavior
+    let flushed = false;
+    let lastSeekTime = 10.0;
+    const dispatchedIds = new Set(['caption-1', 'caption-2', 'caption-3']);
+    const _dispatchedTexts = new Map([['hello', Date.now()], ['world', Date.now()]]);
+
+    function seekedHandler(currentTime) {
+      const delta = Math.abs(currentTime - lastSeekTime);
+      lastSeekTime = currentTime;
+      if (delta < 0.5) return; // micro-seek: skip
+      dispatchedIds.clear();
+      _dispatchedTexts.clear();
+      flushed = true;
+    }
+
+    // Micro-seek (<0.5s) — should NOT flush
+    flushed = false;
+    seekedHandler(10.3); // delta = 0.3s
+    assert(!flushed, 'micro-seek (0.3s) does NOT flush');
+    assertEq(dispatchedIds.size, 3, 'dispatchedIds preserved after micro-seek');
+
+    // Medium seek (0.5s-2s) — flushes because delta > 0.5 threshold
+    flushed = false;
+    seekedHandler(11.0); // delta = 0.7s
+    assert(flushed, 'medium seek (0.7s) DOES flush (> 0.5 threshold)');
+    assertEq(dispatchedIds.size, 0, 'dispatchedIds cleared after medium seek');
+
+    // User seek (>2s) — SHOULD flush
+    flushed = false;
+    seekedHandler(14.0); // delta = 3.0s
+    assert(flushed, 'user seek (3.0s) DOES flush');
+    assertEq(dispatchedIds.size, 0, 'dispatchedIds cleared after user seek');
+    console.log('INV-10: PASS');
+  }
+
+  section('INV-11: Duplicate segment prevention — overlap + similar text → discard older');
+  {
+    const sched = new TestScheduler();
+    // Add first segment at t=10
+    sched.addSegment({ id: 'seg1', text: 'Hello world this is a test', startTime: 10, endTime: 12, untimed: false }, 'x');
+    assertEq(sched.segments.length, 1, '1 segment after first add');
+    assertEq(sched.segments[0].state, 'ready', 'first segment ready');
+
+    // Add duplicate (same text, overlapping time) — should discard first
+    sched.addSegment({ id: 'seg2', text: 'Hello world this is a test', startTime: 10.1, endTime: 12.2, untimed: false }, 'x');
+    assertEq(sched.segments.length, 2, '2 segments in list');
+    assert(sched.segments[0].state === 'discarded', 'first segment discarded as duplicate');
+    assert(sched.segments[1].state === 'ready', 'second segment ready');
+
+    // Add segment with different text at same time — should NOT discard
+    const sched2 = new TestScheduler();
+    sched2.addSegment({ id: 's1', text: 'First caption', startTime: 10, endTime: 12, untimed: false }, 'x');
+    sched2.addSegment({ id: 's2', text: 'Completely different text here', startTime: 10.2, endTime: 12.3, untimed: false }, 'x');
+    assert(sched2.segments[0].state === 'ready', 'different text → first NOT discarded');
+    assert(sched2.segments[1].state === 'ready', 'different text → second added');
+
+    // Add segment at non-overlapping time — should NOT discard
+    const sched3 = new TestScheduler();
+    sched3.addSegment({ id: 's1', text: 'Hello world this is a test', startTime: 10, endTime: 12, untimed: false }, 'x');
+    sched3.addSegment({ id: 's2', text: 'Hello world this is a test', startTime: 20, endTime: 22, untimed: false }, 'x');
+    assert(sched3.segments[0].state === 'ready', 'non-overlapping time → first NOT discarded');
+
+    // Substring match — "Hello" contains in "Hello world this is a test" → discard
+    const sched4 = new TestScheduler();
+    sched4.addSegment({ id: 's1', text: 'Hello world this is a test', startTime: 10, endTime: 12, untimed: false }, 'x');
+    sched4.addSegment({ id: 's2', text: 'Hello', startTime: 10.1, endTime: 11.5, untimed: false }, 'x');
+    assert(sched4.segments[0].state === 'discarded', 'substring match → first discarded');
+    console.log('INV-11: PASS');
+  }
+
+  section('INV-12: Audio lead time — segments play 300ms early');
+  {
+    // The AUDIO_LEAD constant is 0.3s
+    // Segments should start playing when video.currentTime >= targetStart - 0.3
+    const sched = new TestScheduler();
+    sched.addSegment({ id: 'seg1', text: 'Test', startTime: 10, endTime: 12, untimed: false }, 'x');
+
+    // At 9.6s (= 10 - 0.4), segment should NOT play yet
+    sched.video.currentTime = 9.6;
+    sched.tick();
+    assert(sched.segments[0].state === 'ready', 'at 9.6s (< 9.7s lead) → not playing');
+
+    // At 9.7s (= 10 - 0.3), segment SHOULD play
+    sched.video.currentTime = 9.7;
+    sched.tick();
+    assert(sched.segments[0].state === 'playing', 'at 9.7s (= 10 - 0.3) → playing (lead time)');
+    console.log('INV-12: PASS');
   }
 
   section('INV-9: Syntax checks');

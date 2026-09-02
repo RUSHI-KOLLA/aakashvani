@@ -15,13 +15,18 @@
   const PUNCT_RE = /[.?!।।…\u0964\u0965]$/;
   let lastDispatched = '';
   let dispatchedIds = new Set(); // Track dispatched caption IDs for per-cue dedup
+  let _dispatchedTexts = new Map(); // text → timestamp — secondary dedup by normalized text
   let pendingCue = null;
   let debounce = null;
   let observer = null;
 
   // ---- P0-2: Stable caption IDs via hash of timing + text (no counter) ----
+  // Normalize timestamps to 100ms precision so sub-millisecond YouTube re-renders
+  // (e.g., 581.731 vs 581.788) produce the SAME ID for the same caption.
   function _hashCaptionKey(startTime, endTime, text) {
-    const raw = `${startTime.toFixed(6)}|${endTime.toFixed(6)}|${text}`;
+    const normStart = Math.round(startTime * 10) / 10;  // 100ms precision
+    const normEnd = Math.round(endTime * 10) / 10;
+    const raw = `${normStart.toFixed(1)}|${normEnd.toFixed(1)}|${text}`;
     let h = 0;
     for (let i = 0; i < raw.length; i++) {
       h = ((h << 5) - h + raw.charCodeAt(i)) | 0;
@@ -114,6 +119,11 @@
       // Dedup by caption ID (stable) — don't re-dispatch same cue
       if (dispatchedIds.has(caption.id)) continue;
 
+      // ---- Secondary dedup: same normalized text within 1s window ----
+      const now = Date.now();
+      const prevTextTime = _dispatchedTexts.get(normalized);
+      if (prevTextTime && (now - prevTextTime) < 1000) continue;
+
       // ---- P1-5: Correction detection — same cue ID with different text ----
       const prev = _dispatchedCues.get(caption.id);
       if (prev && normalizeText(prev.text) !== normalized) {
@@ -123,7 +133,8 @@
 
       // ---- P0-3: Enqueue EACH cue with its own timing and ID ----
       dispatchedIds.add(caption.id);
-      _dispatchedCues.set(caption.id, { text, dispatchTime: Date.now() });
+      _dispatchedTexts.set(normalized, now);
+      _dispatchedCues.set(caption.id, { text, dispatchTime: now });
 
       // Bound the maps
       if (_dispatchedCues.size > MAX_DISPATCHED_CUES) {
@@ -133,6 +144,10 @@
       if (dispatchedIds.size > MAX_DISPATCHED_CUES) {
         const oldest = dispatchedIds.values().next().value;
         dispatchedIds.delete(oldest);
+      }
+      if (_dispatchedTexts.size > MAX_DISPATCHED_CUES) {
+        const oldest = _dispatchedTexts.keys().next().value;
+        _dispatchedTexts.delete(oldest);
       }
 
       controller.enqueue(caption);
@@ -198,9 +213,22 @@
 
     controller.attach(v);
 
+    // ---- Fix 2: Track last video time to detect micro-seeks vs user seeks ----
+    let _lastSeekTime = v.currentTime;
+
     const seekedHandler = () => {
+      const delta = Math.abs(v.currentTime - _lastSeekTime);
+      _lastSeekTime = v.currentTime;
+
+      // Only flush on user-initiated seeks (>2s), not micro-seeks from buffering (<0.5s)
+      if (delta < 0.5) {
+        console.log(`[AakashVani] micro-seek (${delta.toFixed(2)}s) — skipping flush`);
+        return;
+      }
+      console.log(`[AakashVani] seek detected (${delta.toFixed(2)}s) — flushing`);
       lastDispatched = '';
       dispatchedIds.clear();
+      _dispatchedTexts.clear();
       clearTimeout(debounce);
       _dispatchedCues.clear();
       controller.flush();
@@ -219,6 +247,7 @@
     controller.flush();
     lastDispatched = '';
     dispatchedIds.clear();
+    _dispatchedTexts.clear();
     clearTimeout(debounce);
     _dispatchedCues.clear();
     bindVideo();

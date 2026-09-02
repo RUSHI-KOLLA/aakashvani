@@ -13,8 +13,26 @@ class TimelineScheduler {
   setVideo(video) { this.video = video; }
 
   // ---- P0-1: Insert sorted by targetStart — completion order never affects playback order ----
+  // ---- Fix 3: Duplicate segment prevention — discard older segment if overlap + similar text ----
   addSegment(caption, audioBase64) {
     const seg = this._makeSegment(caption, audioBase64);
+    const newText = (caption.text || '').trim().toLowerCase().replace(/[.!?।।…\u0964\u0965]+$/, '');
+
+    // Check for overlapping segments with similar text — discard the older one
+    for (let i = this.segments.length - 1; i >= 0; i--) {
+      const existing = this.segments[i];
+      if (existing.state === 'discarded' || existing.state === 'completed') continue;
+      const existText = (existing.caption.text || '').trim().toLowerCase().replace(/[.!?।।…\u0964\u0965]+$/, '');
+      const timeOverlap = Math.abs(existing.targetStart - seg.targetStart) < 1.0;
+      const textSimilar = existText === newText || (newText.length > 5 && newText.includes(existText)) || (existText.length > 5 && existText.includes(newText));
+      if (timeOverlap && textSimilar) {
+        // Discard the older segment, keep the new one
+        existing.state = 'discarded';
+        this._cleanupSegment(existing);
+        console.log(`[AakashVani] duplicate segment discarded: "${existing.caption.text.slice(0,40)}" (overlap @ ${existing.targetStart.toFixed(1)}s)`);
+      }
+    }
+
     let insertIdx = this.segments.length;
     for (let i = 0; i < this.segments.length; i++) {
       if (this.segments[i].targetStart > seg.targetStart) {
@@ -69,6 +87,9 @@ class TimelineScheduler {
     }
   }
 
+  // ---- Fix 4: Audio lead time (300ms) to compensate for processing latency ----
+  static AUDIO_LEAD = 0.3;
+
   tick() {
     if (!this.video || this.video.paused) return;
     const now = this.video.currentTime;
@@ -92,9 +113,10 @@ class TimelineScheduler {
         continue;
       }
 
-      // Play ready segments at their start time
+      // Play ready segments — apply 300ms lead time
       if (seg.state === 'ready') {
-        if (now >= seg.targetStart - 0.1) {
+        const playAt = seg.targetStart - TimelineScheduler.AUDIO_LEAD;
+        if (now >= playAt) {
           this._playSegment(this.currentIndex);
         }
         break; // Only play one at a time; next tick will advance
@@ -113,8 +135,7 @@ class TimelineScheduler {
         }
 
         if (videoPastEnd && !audioDone) {
-          // Video moved past segment but audio still playing — don't discard yet
-          // Let audio finish naturally (up to 1s grace after targetEnd)
+          // Video moved past segment but audio still playing — let it finish
         }
       }
 
