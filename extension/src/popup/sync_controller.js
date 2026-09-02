@@ -4,7 +4,7 @@
 
 class TimelineScheduler {
   constructor() {
-    this.segments = []; // { caption, audio, targetStart, targetEnd, state: 'pending'|'ready'|'playing'|'completed'|'discarded' }
+    this.segments = [];
     this.currentIndex = 0;
     this.video = null;
     this._monitorTimer = null;
@@ -12,19 +12,40 @@ class TimelineScheduler {
 
   setVideo(video) { this.video = video; }
 
-  // Add a new segment with target timing from caption
+  // ---- P0-1: Insert sorted by targetStart — completion order never affects playback order ----
   addSegment(caption, audioBase64) {
-    const targetStart = caption.startTime || 0;
-    const targetEnd = caption.endTime || (caption.startTime + caption.duration) || 0;
+    const seg = this._makeSegment(caption, audioBase64);
+    let insertIdx = this.segments.length;
+    for (let i = 0; i < this.segments.length; i++) {
+      if (this.segments[i].targetStart > seg.targetStart) {
+        insertIdx = i;
+        break;
+      }
+    }
+    this.segments.splice(insertIdx, 0, seg);
+    // If we inserted before currentIndex, bump it so we don't skip
+    if (insertIdx <= this.currentIndex) this.currentIndex = insertIdx;
+  }
+
+  _makeSegment(caption, audioBase64) {
     const audio = this._createAudio(audioBase64);
-    this.segments.push({
+    // ---- P0-4: Untimed captions use video.currentTime as start ----
+    let targetStart, targetEnd;
+    if (caption.untimed || caption.startTime == null) {
+      targetStart = this.video ? this.video.currentTime : 0;
+      targetEnd = targetStart + (caption.duration || 3);
+    } else {
+      targetStart = caption.startTime;
+      targetEnd = caption.endTime || (caption.startTime + (caption.duration || 3));
+    }
+    return {
       caption,
       audio,
       targetStart,
       targetEnd,
       state: 'ready',
       scheduledAt: null,
-    });
+    };
   }
 
   _createAudio(base64) {
@@ -37,42 +58,52 @@ class TimelineScheduler {
     return audio;
   }
 
-  // Main scheduler tick - called periodically to advance timeline
+  // ---- P1-5: Invalidate segments whose captionId matches (correction arrived) ----
+  invalidateSegmentsByCaptionId(captionId) {
+    for (const seg of this.segments) {
+      if (seg.caption.id === captionId && (seg.state === 'ready' || seg.state === 'pending')) {
+        seg.state = 'discarded';
+        this._cleanupSegment(seg);
+        console.log(`[AakashVani] invalidated stale segment: ${seg.caption.id} "${seg.caption.text.slice(0,40)}"`);
+      }
+    }
+  }
+
   tick() {
     if (!this.video || this.video.paused) return;
     const now = this.video.currentTime;
 
-    // Advance currentIndex past completed segments
     while (this.currentIndex < this.segments.length) {
       const seg = this.segments[this.currentIndex];
-      if (seg.state === 'completed') {
+      if (seg.state === 'completed' || seg.state === 'discarded') {
         this.currentIndex++;
         continue;
       }
-      // If segment is ready and we've reached its start time, play it
-      if (seg.state === 'ready' && now >= seg.targetStart - 0.1) { // small lead-in
+      if (seg.state === 'ready' && now >= seg.targetStart - 0.1) {
         this._playSegment(this.currentIndex);
       }
       break;
     }
 
-    // Discard stale segments that are far behind
-    while (this.currentIndex < this.segments.length) {
+    // Discard stale segments far behind
+    let advanced = true;
+    while (advanced) {
+      advanced = false;
+      if (this.currentIndex >= this.segments.length) break;
       const seg = this.segments[this.currentIndex];
-      if (seg.state === 'ready' && now > seg.targetEnd + 2.0) { // 2s grace period after end
+      if (seg.state === 'ready' && now > seg.targetEnd + 2.0) {
         console.log(`[AakashVani] discarding stale segment: ${seg.caption.text.slice(0,40)}`);
         seg.state = 'discarded';
         this._cleanupSegment(seg);
         this.currentIndex++;
+        advanced = true;
       } else if (seg.state === 'playing' && now > seg.targetEnd + 1.0) {
-        // Segment playing but past its end - let it finish naturally or force stop
         if (seg.audio.currentTime >= seg.audio.duration - 0.1) {
           seg.state = 'completed';
           this._cleanupSegment(seg);
           this.currentIndex++;
+          advanced = true;
         }
-      } else {
-        break;
       }
     }
   }
@@ -80,16 +111,15 @@ class TimelineScheduler {
   _playSegment(index) {
     const seg = this.segments[index];
     if (seg.state !== 'ready') return;
-    
     seg.state = 'playing';
     seg.scheduledAt = Date.now();
     seg.audio.playbackRate = 1.0;
     seg.audio.preservesPitch = true;
-    
     const done = () => {
+      if (seg.state !== 'playing') return;
       seg.state = 'completed';
-      try { URL.revokeObjectURL(seg.audio._blobUrl); } catch(_) {}
-      this.tick(); // check for next segment
+      try { URL.revokeObjectURL(seg.audio._blobUrl); } catch (_) {}
+      this.tick();
     };
     seg.audio.onended = done;
     seg.audio.onerror = done;
@@ -98,30 +128,26 @@ class TimelineScheduler {
   }
 
   _cleanupSegment(seg) {
-    try { 
-      seg.audio.pause(); 
-      seg.audio.src = ''; 
-      URL.revokeObjectURL(seg.audio._blobUrl); 
-    } catch(_) {}
+    try {
+      seg.audio.pause();
+      seg.audio.src = '';
+      URL.revokeObjectURL(seg.audio._blobUrl);
+    } catch (_) {}
   }
 
-  // Check if we should adjust playback rate for drift
   checkDrift() {
     if (!this.video || this.currentIndex >= this.segments.length) return;
     const seg = this.segments[this.currentIndex];
-    if (seg.state !== 'playing' || !this.video || this.video.paused) return;
-    
+    if (seg.state !== 'playing' || this.video.paused) return;
     const now = this.video.currentTime;
     const audioProgress = seg.audio.currentTime;
     const expectedProgress = now - seg.targetStart;
-    const drift = expectedProgress - audioProgress; // positive = audio behind
-    
+    const drift = expectedProgress - audioProgress;
     let targetRate = 1.0;
     if (drift > 0.9) targetRate = 1.25;
     else if (drift > 0.65) targetRate = 1.15;
     else if (drift > 0.4) targetRate = 1.05;
-    else if (drift < -0.5) targetRate = 0.95; // audio ahead - slow down slightly
-    
+    else if (drift < -0.5) targetRate = 0.95;
     if (Math.abs(seg.audio.playbackRate - targetRate) > 0.02) {
       seg.audio.playbackRate = targetRate;
       if (targetRate !== 1.0) console.log(`[AakashVani] drift ${drift.toFixed(2)}s → ${targetRate}x`);
@@ -136,26 +162,21 @@ class TimelineScheduler {
   }
 }
 
-// AakashVani sync controller — timeline-based audio synchronization.
-// Translation + TTS for segment N+1 overlap while segment N is playing.
-// Timeline scheduler synchronizes audio segments to YouTube video timeline.
-
 class SyncController {
   constructor() {
     this.settings = { ducking: 10, mode: 'auto' };
     this.queue = [];
     this.inflight = [];
-    this.playback = []; // legacy, kept for compatibility
     this.playing = false;
     this.video = null;
     this.prevVolume = null;
     this.LOOKAHEAD = 3;
     this._lastBanner = 0;
     this._lastErr = null;
-    this._generation = 0; // increments on seek/flush — stale inflight results are discarded
-    
-    // New timeline-based scheduler
+    this._generation = 0;
     this.scheduler = new TimelineScheduler();
+    this._checkpointBuffer = [];
+    this._checkpointBufferMax = 10;
 
     chrome.storage.local.get(['ducking', 'mode'], (s) => { this.settings = { ...this.settings, ...s }; });
     chrome.storage.onChanged.addListener((ch) => {
@@ -167,7 +188,7 @@ class SyncController {
     });
   }
 
-  attach(videoEl) { 
+  attach(videoEl) {
     this.video = videoEl;
     this.scheduler.setVideo(videoEl);
   }
@@ -175,24 +196,19 @@ class SyncController {
   enqueue(caption) {
     if (!caption) return;
     if (this.settings.mode === 'off') return;
-    // Handle both old string format and new caption object
     const text = typeof caption === 'string' ? caption.trim() : (caption.text || '').trim();
     if (!text) return;
-    
-    // Bounded queue: if video paused, queue could grow unbounded → cap at 8
     const MAX_QUEUE = 8;
     if (this.queue.length >= MAX_QUEUE) {
-      console.warn(`[AakashVani] queue full (8) — dropping oldest:`, this.queue[0]?.text?.slice(0,40) || this.queue[0]?.slice(0,40));
+      console.warn(`[AakashVani] queue full (8) — dropping oldest`);
       this.queue.shift();
     }
-    // Queue-level dedup: prevent same sentence enqueued multiple times while
-    // still pending/inflight/playing (YouTube re-renders same caption on style changes)
-    const isDuplicate = this.queue.some(q => (typeof q === 'string' ? q : q.text) === text) ||
-                       this.inflight.some(p => p._aakashText === text) ||
-                       this.scheduler.segments.some(s => s.state === 'ready' && s.caption.text === text);
+    // Dedup by caption ID (stable) not by text
+    const cid = caption.id || '';
+    const isDuplicate = this.queue.some(q => (q.id || '') === cid) ||
+      this.inflight.some(p => p._aakashCid === cid) ||
+      this.scheduler.segments.some(s => (s.caption.id || '') === cid && (s.state === 'ready' || s.state === 'playing' || s.state === 'pending'));
     if (isDuplicate) return;
-    
-    // Store the full caption object in queue for timing info
     this.queue.push(caption);
     this.pumpPipeline();
     this.scheduler.tick();
@@ -202,50 +218,42 @@ class SyncController {
     while (this.inflight.length < this.LOOKAHEAD && this.queue.length > 0) {
       const caption = this.queue.shift();
       const text = typeof caption === 'string' ? caption.trim() : (caption.text || '').trim();
-      const originalText = text; // for skip logging
       const gen = this._generation;
       const p = this.processLine(caption, gen)
         .then((audioBase64) => {
           if (gen !== this._generation) {
-            console.log(`[AakashVani] stale segment discarded (seek/navigation): ${JSON.stringify(originalText).slice(0, 60)}`);
-            if (audioBase64) { try { const tmp = this.makeAudio(audioBase64); URL.revokeObjectURL(tmp.url); } catch(_){} }
+            if (audioBase64) { try { const tmp = this.makeAudio(audioBase64); URL.revokeObjectURL(tmp.url); } catch (_) {} }
             return;
           }
           if (audioBase64) {
             this.scheduler.addSegment(caption, audioBase64);
             this.scheduler.tick();
-          } else console.log(`[AakashVani] segment skipped (no audio): ${JSON.stringify(originalText).slice(0, 80)}`);
+          }
         })
         .catch((e) => {
-          if (gen !== this._generation) return null; // stale — already flushed, no log
-          // Non-blocking: log exact server message, mark segment failed, never stall the pipeline
+          if (gen !== this._generation) return null;
           const now = Date.now();
           if (!this._lastErr || this._lastErr.msg !== e.message || now - this._lastErr.t > 30000) {
-            console.warn(`[AakashVani] segment failed, skipping to N+1 | text=${JSON.stringify(originalText).slice(0, 80)} | error:`, e.message);
+            console.warn(`[AakashVani] segment failed | text=${JSON.stringify(text).slice(0, 80)} | error:`, e.message);
             this._lastErr = { msg: e.message, t: now };
-          } else {
-            console.log(`[AakashVani] segment failed (throttled) → skip: ${JSON.stringify(originalText).slice(0, 60)}`);
           }
-          // Swallow — queue keeps flowing to N+1
           return null;
         })
         .finally(() => {
           this.inflight = this.inflight.filter((x) => x !== p);
           this.pumpPipeline();
         });
-      p._aakashText = text;
+      p._aakashCid = caption.id || '';
       this.inflight.push(p);
     }
   }
 
   async processLine(caption, genAtStart) {
-    // Stale check: if generation changed while we were queued, abort early
     if (genAtStart !== undefined && genAtStart !== this._generation) return null;
-    // Background/offscreen pipeline always returns translated text (Chrome or cloud fallback).
     const settings = this.settings;
-    // Extract text from caption object or string
     const rawText = typeof caption === 'string' ? caption.trim() : (caption.text || '').trim();
     if (!rawText) return null;
+
     let res;
     try {
       res = await chrome.runtime.sendMessage({
@@ -257,50 +265,60 @@ class SyncController {
       });
     } catch (e) {
       if (genAtStart !== undefined && genAtStart !== this._generation) return null;
-      // chrome.runtime.lastError or port closed — don't freeze queue
-      console.warn(`[AakashVani] TRANSLATE transport error for ${JSON.stringify(rawText).slice(0, 60)}:`, e.message);
+      console.warn(`[AakashVani] TRANSLATE transport error:`, e.message);
       return null;
     }
     if (genAtStart !== undefined && genAtStart !== this._generation) return null;
-    if (!res) {
-      console.warn(`[AakashVani] TRANSLATE no response (reload extension) — skipping: ${JSON.stringify(rawText).slice(0, 60)}`);
-      return null;
-    }
+    if (!res) return null;
     if (!res.ok) {
-      // Exact server error — log and let caller mark as failed without throwing uncaught
       console.warn(`[AakashVani] TRANSLATE failed | text=${JSON.stringify(rawText).slice(0, 80)} | server: ${res.error}`);
       throw new Error(res.error || 'translation failed');
     }
     const translated = res.translated;
     if (!translated) return null;
 
-    // 2) TTS via service worker (IITM FastSpeech2) — pipelined ahead of playback
     if (genAtStart !== undefined && genAtStart !== this._generation) return null;
     let tts;
     try {
       tts = await chrome.runtime.sendMessage({ type: 'TTS_ONLY', text: translated, language: settings.language || 'te-IN' });
     } catch (e) {
       if (genAtStart !== undefined && genAtStart !== this._generation) return null;
-      console.warn(`[AakashVani] TTS transport error for ${JSON.stringify(translated).slice(0, 60)}:`, e.message);
+      console.warn(`[AakashVani] TTS transport error:`, e.message);
       return null;
     }
-    if (!tts) {
-      console.warn(`[AakashVani] TTS no response — skipping: ${JSON.stringify(translated).slice(0, 60)}`);
-      return null;
-    }
+    if (!tts) return null;
     if (!tts.ok) {
-      // Exact TTS server error (500→503 mapping) — log and skip cleanly
       const errMsg = tts.error || '';
       if (errMsg.startsWith('checkpoint_preparing:')) {
         const missingLang = errMsg.split(':')[1];
-        console.warn(`[AakashVani] TTS checkpoint preparing for ${missingLang} — skipping segment`);
-        this.showBanner(`Voice for ${missingLang} is preparing — skipping this segment`);
-        return null; // Skip this segment, don't retry
+        console.warn(`[AakashVani] TTS checkpoint preparing for ${missingLang} — buffering segment`);
+        if (this._checkpointBuffer.length < this._checkpointBufferMax) {
+          this._checkpointBuffer.push({ caption, genAtStart, translated });
+        }
+        return null;
       }
-      console.warn(`[AakashVani] TTS failed (server ${tts.error?.slice(0, 200)}) | text=${JSON.stringify(translated).slice(0, 80)} — skipping to next segment`);
+      console.warn(`[AakashVani] TTS failed (${tts.error?.slice(0, 120)}) | text=${JSON.stringify(translated).slice(0, 80)}`);
       throw new Error(tts.error);
     }
     return tts.audio;
+  }
+
+  // ---- P1-7: Retry buffered captions when checkpoint becomes ready ----
+  async retryCheckpointBuffer() {
+    if (!this._checkpointBuffer.length) return;
+    const buffer = this._checkpointBuffer.splice(0, this._checkpointBufferMax);
+    for (const item of buffer) {
+      if (item.genAtStart !== this._generation) continue;
+      try {
+        const tts = await chrome.runtime.sendMessage({ type: 'TTS_ONLY', text: item.translated, language: this.settings.language || 'te-IN' });
+        if (tts && tts.ok && item.genAtStart === this._generation) {
+          this.scheduler.addSegment(item.caption, tts.audio);
+          this.scheduler.tick();
+        }
+      } catch (e) {
+        console.warn(`[AakashVani] checkpoint buffer retry failed:`, e.message);
+      }
+    }
   }
 
   showBanner(msg) {
@@ -325,18 +343,26 @@ class SyncController {
     const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
     const audio = new Audio(url);
     audio.preload = 'auto';
-    audio.preservesPitch = true; // keep pitch when we speed up for drift
+    audio.preservesPitch = true;
     audio._blobUrl = url;
     return { audio, url };
   }
 
-  // Legacy method - now delegates to scheduler
+  // ---- P1-5: Invalidate stale TTS for a caption ID (correction arrived) ----
+  invalidateCaption(captionId) {
+    this._generation++;
+    this.scheduler.invalidateSegmentsByCaptionId(captionId);
+    this.queue = this.queue.filter(q => (q.id || '') !== captionId);
+    this._checkpointBuffer = this._checkpointBuffer.filter(b => (b.caption.id || '') !== captionId);
+  }
+
   tryPlayNext() {
     this.scheduler.tick();
     this.scheduler.checkDrift();
   }
 
-  _startDriftMonitor(audio) {
+  _startDriftMonitor() {
+    this._stopDriftMonitor();
     this.scheduler._monitorTimer = setInterval(() => {
       this.scheduler.checkDrift();
     }, 300);
@@ -347,21 +373,19 @@ class SyncController {
   }
 
   pauseDubbed() {
-    if (this.scheduler.segments[this.scheduler.currentIndex]?.audio && !this.scheduler.segments[this.scheduler.currentIndex]?.audio.paused) {
-      try { this.scheduler.segments[this.scheduler.currentIndex].audio.pause(); } catch(_) {}
-      this.scheduler._stopDriftMonitor();
+    const seg = this.scheduler.segments[this.scheduler.currentIndex];
+    if (seg && seg.state === 'playing' && !seg.audio.paused) {
+      try { seg.audio.pause(); } catch (_) {}
+      this._stopDriftMonitor();
       console.log('[AakashVani] dub paused (video paused)');
     }
   }
 
   resumeDubbed() {
     const seg = this.scheduler.segments[this.scheduler.currentIndex];
-    if (!seg || seg.audio.paused && !seg.video.paused) {
-      seg.audio.play().catch(()=>{});
-      // Recalculate timing
-      this.scheduler._playStartWallMs = Date.now() - (seg.audio.currentTime * 1000);
-      this.scheduler._playStartVideoTime = this.video.currentTime - seg.audio.currentTime;
-      this._startDriftMonitor(seg.audio);
+    if (seg && seg.state === 'playing' && seg.audio.paused) {
+      seg.audio.play().catch(() => {});
+      this._startDriftMonitor();
       console.log('[AakashVani] dub resumed');
     } else {
       this.scheduler.tick();
@@ -383,20 +407,9 @@ class SyncController {
   flush() {
     this._generation++;
     this._stopDriftMonitor();
-    // Stop active dubbed audio immediately — never let stale audio survive seek/navigation/pause
-    if (this.scheduler._activeAudio) {
-      try { this.scheduler._activeAudio.pause(); this.scheduler._activeAudio.src = ''; } catch(_) {}
-      try { if (this.scheduler._activeItem && this.scheduler._activeItem.url) URL.revokeObjectURL(this.scheduler._activeItem.url); else if (this.scheduler._activeAudio._blobUrl) URL.revokeObjectURL(this.scheduler._activeAudio._blobUrl); } catch(_) {}
-    }
-    this.scheduler._activeAudio = null;
-    this.scheduler._activeItem = null;
+    this.scheduler.clear();
     this.queue = [];
-    // Cancel any buffered audio
-    this.scheduler.segments.forEach((i) => {
-      try { i.audio.pause(); i.audio.src = ''; URL.revokeObjectURL(i.url); } catch (_) {}
-    });
-    this.scheduler.segments = [];
-    this.scheduler.currentIndex = 0;
+    this._checkpointBuffer = [];
     this.playing = false;
     this.duck(false);
   }
