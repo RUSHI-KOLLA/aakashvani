@@ -5,10 +5,10 @@ Endpoints:
   POST /api/v1/tts/piper/prepare        start background voice download (~60MB)
   GET  /api/v1/tts/piper/prepare/status poll download progress
 
-Response shape mirrors the IITM /api/v1/tts contract so the extension can
+Response shape matches the TTS contract so the extension can
 consume Piper output with no changes (status, mode="piper", language_code,
 duration_seconds, audio_base64). Missing/unsupported language -> 503 with
-checkpoint_missing, matching the IITM error contract.
+checkpoint_missing, matching the TTS error contract.
 """
 import base64
 import traceback

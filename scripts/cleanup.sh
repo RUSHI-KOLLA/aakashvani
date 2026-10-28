@@ -14,8 +14,6 @@ TARGETS=(
   "$ROOT/backend/app/__pycache__"
   "$ROOT/backend/app/routers/__pycache__"
   "$ROOT/backend/app/services/__pycache__"
-  "$ROOT/backend/third_party/iitm_indic_tts/__pycache__"
-  "$ROOT/backend/third_party/iitm_indic_tts/hifigan/__pycache__"
 )
 
 echo "== Dry run (use --apply to delete) =="

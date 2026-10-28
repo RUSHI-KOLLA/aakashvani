@@ -1,20 +1,18 @@
 """AakashVani local engine — FastAPI entrypoint.
 
 Endpoints:
-  GET  /api/v1/health    liveness + TTS load report (IITM + Piper)
+  GET  /api/v1/health    liveness + Piper TTS load report
   POST /api/v1/translate translation via Sarvam cloud (BYOK)
-  POST /api/v1/tts       speech synthesis (IITM FastSpeech2 + HiFi-GAN)
   POST /api/v1/tts/piper speech synthesis (Piper ONNX)
 
 Translation:
   - cloud mode: POST /api/v1/translate via Sarvam AI (requires SARVAM_API_KEY)
   - edge mode:  Chrome built-in Translator API (in extension, no backend call)
 
-Run: uvicorn app.main:app --host 127.0.0.1 --port 8000  (from ./venv)
+TTS backend:
+  - Piper ONNX (active) at /api/v1/tts/piper
 
-TTS backends:
-  - IITM FastSpeech2-HS + HiFi-GAN (existing, unchanged) at /api/v1/tts
-  - Piper ONNX (new, additive) at /api/v1/tts/piper
+Run: uvicorn app.main:app --host 127.0.0.1 --port 8000  (from ./venv)
 """
 import os
 from contextlib import asynccontextmanager
@@ -25,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()  # reads backend/.env when run outside containers
 
-from app.routers import translate, tts, piper  # noqa: E402  (after dotenv)
+from app.routers import translate, piper  # noqa: E402  (after dotenv)
 
 HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "8000"))
@@ -33,11 +31,9 @@ PORT = int(os.getenv("PORT", "8000"))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from app.services import iitm_tts, piper_tts
-    await iitm_tts.startup()
+    from app.services import piper_tts
     await piper_tts.startup()
     yield
-    iitm_tts.shutdown()
     piper_tts.shutdown()
 
 
@@ -53,7 +49,6 @@ app.add_middleware(
 )
 
 app.include_router(translate.router)
-app.include_router(tts.router)
 app.include_router(piper.router)
 
 
@@ -62,37 +57,32 @@ async def root():
     return {"message": "AakashVani Local Engine is running."}
 
 
+def piper_models_available() -> list[str]:
+    from app.services import piper_models
+    return piper_models.available_languages()
+
+
 @app.get("/api/v1/health", tags=["Health"])
 async def health():
-    from app.services import checkpoint_store, iitm_tts, piper_tts
+    from app.services import piper_tts
 
     has_sarvam = bool(os.getenv("SARVAM_API_KEY") or os.getenv("HF_TOKEN"))
-    # structured health: healthy if at least one checkpoint ready, degraded if none, unavailable if backend error
-    checkpoints = checkpoint_store.available_languages()
-    if iitm_tts.is_loaded():
+    # structured health: healthy if Piper voice loaded, unavailable otherwise
+    if piper_tts.is_loaded():
         health_status = "healthy"
-    elif piper_tts.is_loaded():
-        health_status = "healthy"
-    elif checkpoints:
-        health_status = "degraded"  # checkpoints ready but no model loaded yet
-    elif checkpoint_store.BASE_URL:
-        health_status = "degraded"
     else:
         health_status = "unavailable"
 
     return {
         "status": health_status,
-        "tts_loaded": iitm_tts.is_loaded(),
-        "tts_backend": iitm_tts.backend_name(),
-        "tts_current_lang": iitm_tts.current_language(),
-        "tts_loading": iitm_tts.is_loading(),
+        "tts_loaded": piper_tts.is_loaded(),
+        "tts_backend": piper_tts.backend_name(),
+        "tts_current_lang": piper_tts.current_language(),
+        "tts_loading": piper_tts.is_loading(),
         "piper_tts_loaded": piper_tts.is_loaded(),
         "piper_tts_backend": piper_tts.backend_name(),
         "piper_tts_current_lang": piper_tts.current_language(),
         "piper_tts_loading": piper_tts.is_loading(),
-        "checkpoints_available": checkpoints,
-        "checkpoints_status": checkpoint_store.status_all() if hasattr(checkpoint_store, "status_all") else {},
-        "checkpoint_base_url_configured": bool(checkpoint_store.BASE_URL),
         "piper_voices_available": piper_models_available(),
         "translation": {
             "sarvam_configured": has_sarvam,
@@ -100,8 +90,3 @@ async def health():
         },
         "version": "3.0",
     }
-
-
-def piper_models_available() -> list[str]:
-    from app.services import piper_models
-    return piper_models.available_languages()

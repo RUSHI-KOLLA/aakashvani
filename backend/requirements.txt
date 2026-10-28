@@ -4,15 +4,7 @@ httpx
 pydantic
 python-dotenv
 soundfile
-scipy
 numpy
-pyyaml
-pandas
-tqdm
-# --- IITM FastSpeech2 + HiFi-GAN (HS) edge TTS ---
-espnet==202511
-espnet_tts_frontend
-indic-num2words
-g2p-en
-indic-unified-parser
-
+onnxruntime
+piper-tts
+phonemizer

@@ -2,12 +2,12 @@
 
 ## Automated verification (all PASSED)
 
-### A. Real HTTP integration against running backend (`backend/tests/test_http_integration.py`: 35/35)
+### A. Real HTTP integration against running backend (`backend/tests/test_http_integration.py`)
 Ran against a live uvicorn server (`http://127.0.0.1:8000`), Piper models downloaded from Hugging Face at runtime.
 
 | # | Check | Result |
 |---|-------|--------|
-| A1 | `GET /api/v1/health` reports `piper_tts_*`, `piper_voices_available`, IITM fields intact | PASS |
+| A1 | `GET /api/v1/health` reports `piper_tts_*`, `tts_loaded` (Piper), `piper_voices_available` | PASS |
 | A2 | Piper TTS te-IN → 200, mode=piper, valid PCM_16 WAV 22050Hz, nonzero audio | PASS |
 | A3 | Piper TTS hi-IN → 200, valid PCM_16 WAV 22050Hz | PASS |
 | A4 | ml-IN missing → 503 `checkpoint_missing`; `POST /prepare` → download → ready → 200 valid WAV | PASS |
@@ -15,20 +15,20 @@ Ran against a live uvicorn server (`http://127.0.0.1:8000`), Piper models downlo
 | A5 | ta-IN (unsupported, no Piper voice) → 503 `piper_voice_missing` + supported list | PASS |
 | A6 | empty/punct text → 400 | PASS |
 | A7 | long text (>1200 chars) → 200 valid WAV (truncation) | PASS |
-| A8 | IITM `/api/v1/tts` still returns 503 (no IITM checkpoint) — IITM untouched & distinct | PASS |
-| A9 | Concurrent te-IN + hi-IN → both 200, valid WAV, no clobber | PASS (5/5 repeat runs stable) |
-| A10 | IITM=503 & Piper=200 on same lang — endpoints distinct, no cross-talk | PASS |
+| A9 | Concurrent te-IN + hi-IN → both 200, valid WAV, no clobber | PASS |
 
-### Piper unit tests (`backend/tests/test_piper.py`: 28/28)
-Real models from Hugging Face: Telugu + Hindi synthesis; Kannada missing-model; Tamil unsupported; empty text; voice info.
+IITM `/api/v1/tts` endpoint removed — no A8/A10 checks apply.
+
+### Piper unit tests (`backend/tests/test_piper.py`: 47/47)
+Real models from Hugging Face: Telugu + Hindi synthesis; Malayalam missing-model; Tamil/Kannada unsupported; empty text; language-to-voice mapping correctness.
 
 ### B. Extension logic (Node)
 | Test | Result |
 |------|--------|
-| `node --check` on all 5 modified extension JS files | PASS |
+| `node --check` on all modified extension JS files | PASS |
 | `test_behavioral.js` | PASS |
 | `test_adversarial.js` | 96/96 PASS |
-| `test_tts_routing.js` (endpoint selection: piper↔`/api/v1/tts/piper`, iitm↔`/api/v1/tts`, default↔iitm) | 13/13 PASS |
+| `test_tts_routing.js` (endpoint selection: piper↔`/api/v1/tts/piper`, default→`/api/v1/tts/piper`) | 13/13 PASS |
 
 ### C. Browser attempt (Chrome headless)
 - Chrome 153 headless launches; DevTools on :9222; X server on :1 → environment SUPPORTS browser testing.
@@ -47,8 +47,19 @@ Therefore: **real browser E2E is NOT claimed as passed.** Precise manual steps a
 ## Remaining unverified (browser) — manual steps
 See `docs/PIPER_MANUAL_TEST_STEPS.md` (below).
 
-## Files changed in this phase
-- `backend/app/services/piper_tts.py` (concurrency atomicity fix + `_sanitize_text` restored)
-- `backend/tests/test_http_integration.py` (new, real-server integration tests)
-- `extension/tests/test_tts_routing.js` (new, endpoint-routing verification)
-- `docs/PIPER_VERIFICATION_PLAN.md` (this file)
+## Files changed in this phase (IITM removal)
+- `backend/app/main.py` — removed IITM lifespan/health wiring; Piper-only health
+- `backend/app/services/iitm_tts.py` — deleted (IITM TTS service)
+- `backend/app/services/checkpoint_store.py` — deleted (IITM checkpoint store)
+- `backend/app/routers/tts.py` — deleted (IITM `/api/v1/tts` router)
+- `backend/third_party/iitm_indic_tts/` — deleted (vendored IITM/HiFi-GAN code)
+- `backend/requirements.txt` — removed espnet/torch/scipy/pandas/tqdm/pyyaml/IITM deps; added onnxruntime/piper-tts/phonemizer
+- `backend/.env.example` — removed TTS_CHECKPOINT_BASE_URL/TTS_GENDER; added PIPER_* vars
+- `backend/Dockerfile` — removed torch/IITM model dir; added espeak-ng/espeak-ng-data
+- `backend/tests/test_unit.py` — deleted (IITM-only tests)
+- `backend/tests/test_http_integration.py` — removed IITM A8/A10 checks
+- `extension/src/popup/{service_worker,sync_controller,popup}.js` — default ttsBackend 'iitm'→'piper'
+- `extension/src/popup/popup.html` — removed IITM TTS option
+- `extension/tests/test_tts_routing.js` — piper-default routing checks
+- `scripts/cleanup.sh` — removed stale iitm_indic_tts references
+- docs updated to describe Piper as active TTS engine

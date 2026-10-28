@@ -15,7 +15,7 @@
 | cloud fallback | Yes | Partial | No | `cloudFallback` flag ignored in some paths (now fixed to fallback when key present) |
 | Indic languages | Yes | Partial | No | 6 in registry, only te/hi/kn checkpoints present, `LANGS` duplicated |
 | checkpoint management | Yes | No | No | Global `_state` race, single slot, no per-lang, no checksum, no atomic rename |
-| TTS | Yes | Partial | No | IITM+HiFiGAN works (te/hi verified), but `MAX_WORKERS=1` bottleneck, CWD lock |
+| TTS | Yes | Partial | No | Piper ONNX active (te/hi/ml/mr verified); kn-IN/ta-IN unsupported (no Piper voice) |
 | low latency | Partial | Partial | No | LOOKAHEAD=3 pipelining, but no warmup, no backpressure, unbounded memory if paused |
 | audio synchronization | Partial | Partial | No | Simple drift 400/650/900ms → 1.05/1.15/1.25x, no slowdown, no scheduler |
 | pause/resume | No | No | No | `tryPlayNext` blocks on `video.paused` but active audio not paused on video pause |
@@ -32,9 +32,9 @@
 
 ```
 YouTube DOM (.ytp-caption-segment) → content.js (250ms debounce, superstring delta) → SyncController.enqueue
-→ SyncController LOOKAHEAD=3 → processLine: TRANSLATE via service_worker → offscreen.js (window.Translator or Sarvam backend) → TTS_ONLY via service_worker → backend /api/v1/tts (checkpoint_store + iitm_tts ThreadPool1) → base64 WAV → Audio blob → ducking + drift playbackRate → video
-Popup → settings (chrome.storage: mode, language, apiKey, cloudFallback, engineUrl, ducking) → service_worker + sync_controller
-Backend: FastAPI lifespan → checkpoint_store (HuggingFace) → iitm_tts (FastSpeech2+HiFiGAN, one resident)
+→ SyncController LOOKAHEAD=3 → processLine: TRANSLATE via service_worker → offscreen.js (window.Translator or Sarvam backend) → TTS_ONLY via service_worker → backend /api/v1/tts/piper (piper_tts ThreadPool1) → base64 WAV → Audio blob → ducking + drift playbackRate → video
+Popup → settings (chrome.storage: mode, language, apiKey, cloudFallback, engineUrl, ducking, ttsBackend) → service_worker + sync_controller
+Backend: FastAPI lifespan → piper_tts (Piper ONNX, one resident)
 ```
 
 ## 3. Known Bugs (Open)

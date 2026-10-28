@@ -185,7 +185,7 @@ class TimelineScheduler {
 
 class SyncController {
   constructor() {
-    this.settings = { ducking: 10, mode: 'auto', ttsBackend: 'iitm' };
+    this.settings = { ducking: 10, mode: 'auto', ttsBackend: 'piper' };
     this.queue = [];
     this.inflight = [];
     this.playing = false;
@@ -339,7 +339,7 @@ class SyncController {
     if (!audioBase64) {
       let tts;
       try {
-        tts = await chrome.runtime.sendMessage({ type: 'TTS_ONLY', text: translated, language: lang, backend: this.settings.ttsBackend || 'iitm' });
+        tts = await chrome.runtime.sendMessage({ type: 'TTS_ONLY', text: translated, language: lang, backend: this.settings.ttsBackend || 'piper' });
       } catch (e) {
         if (genAtStart !== undefined && genAtStart !== this._generation) return null;
         console.warn(`[AakashVani] TTS transport error:`, e.message);
@@ -378,7 +378,7 @@ class SyncController {
     for (const item of buffer) {
       if (item.genAtStart !== this._generation) continue;
       try {
-        const tts = await chrome.runtime.sendMessage({ type: 'TTS_ONLY', text: item.translated, language: this.settings.language || 'te-IN', backend: this.settings.ttsBackend || 'iitm' });
+        const tts = await chrome.runtime.sendMessage({ type: 'TTS_ONLY', text: item.translated, language: this.settings.language || 'te-IN', backend: this.settings.ttsBackend || 'piper' });
         if (tts && tts.ok && item.genAtStart === this._generation) {
           this.scheduler.addSegment(item.caption, tts.audio);
           this.scheduler.tick();

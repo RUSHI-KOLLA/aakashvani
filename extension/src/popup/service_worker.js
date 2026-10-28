@@ -1,7 +1,7 @@
 // AakashVani background orchestrator (MV3 service worker).
 // Architecture:
 //   - Translation: offscreen document (has page context → window.Translator) or Sarvam backend
-//   - TTS: local IITM FastSpeech2 via POST /api/v1/tts
+//   - TTS: local Piper ONNX via POST /api/v1/tts/piper
 //   - Service worker coordinates everything but never touches Translator API directly
 
 const DEFAULT_ENGINE = 'http://127.0.0.1:8000';
@@ -71,8 +71,8 @@ async function translateViaOffscreen(payload) {
   });
 }
 
-// ---- TTS (IITM FastSpeech2 or Piper ONNX) ----
-async function synthesizeSpeech(text, language, backend = 'iitm') {
+// ---- TTS (Piper ONNX) ----
+async function synthesizeSpeech(text, language, backend = 'piper') {
   const engine = await getEngineUrl();
   const isPiper = backend === 'piper';
   const path = isPiper ? '/api/v1/tts/piper' : '/api/v1/tts';
@@ -90,7 +90,7 @@ async function synthesizeSpeech(text, language, backend = 'iitm') {
     if (res.status === 503) {
       const err = await res.json().catch(() => ({}));
       const detail = err.detail || {};
-      // checkpoint_missing = voice downloadable (IITM or Piper); piper_voice_missing = no voice exists (permanent)
+      // checkpoint_missing = voice downloadable (Piper); piper_voice_missing = no voice exists (permanent)
       if (detail.checkpoint_missing) {
         prepareCheckpoint(detail.checkpoint_missing, backend).catch(() => {});
         throw new Error(`checkpoint_preparing:${detail.checkpoint_missing}`);
@@ -108,7 +108,7 @@ async function synthesizeSpeech(text, language, backend = 'iitm') {
   }
 }
 
-async function prepareCheckpoint(lang, backend = 'iitm') {
+async function prepareCheckpoint(lang, backend = 'piper') {
   const engine = await getEngineUrl();
   const isPiper = backend === 'piper';
   const start = await fetch(`${engine}/api/v1/${isPiper ? 'tts/piper' : 'tts'}/prepare`, {
@@ -166,4 +166,4 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return true;
 });
 
-console.log('[AakashVani] service worker ready (offscreen translation + IITM TTS)');
+console.log('[AakashVani] service worker ready (offscreen translation + Piper TTS)');

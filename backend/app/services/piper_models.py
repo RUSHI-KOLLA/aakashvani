@@ -3,8 +3,8 @@
 Downloads Piper voices from the official rhasspy/piper-voices release on
 Hugging Face and keeps them under a local checkpoints directory.
 
-This module is fully independent of the IITM checkpoint_store so the IITM
-implementation is left completely untouched during the migration.
+This module is fully independent of any legacy checkpoint store, so legacy
+code can be removed without affecting Piper voice downloads.
 
 Repo layout (per language):
   https://huggingface.co/rhasspy/piper-voices/resolve/main/{lang}/{voice}/{quality}/

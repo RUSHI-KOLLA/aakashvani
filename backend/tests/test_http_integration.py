@@ -1,6 +1,6 @@
 """Real HTTP integration tests against the running AakashVani backend.
-Covers verification plan categories A1-A10 (Piper + IITM routing).
-Run: backend/venv/bin/python test_http_integration.py  (server must be up on :8099)
+Covers verification plan categories A1-A9 (Piper TTS).
+Run: backend/venv/bin/python test_http_integration.py  (server must be up on :8000)
 """
 import base64, io, json, sys, time
 import urllib.request, urllib.error
@@ -56,9 +56,9 @@ check(body.get("status") in ("healthy", "degraded", "unavailable"), "health has 
 check("piper_tts_loaded" in body, "health reports piper_tts_loaded")
 check("piper_tts_backend" in body, "health reports piper_tts_backend")
 check("piper_voices_available" in body, "health reports piper_voices_available")
-check("tts_loaded" in body and "tts_backend" in body, "health still reports IITM fields (IITM intact)")
+check("tts_loaded" in body and "tts_backend" in body, "health still reports tts fields (Piper backend)")
 print(f"  piper_voices_available: {body.get('piper_voices_available')}")
-print(f"  IITM tts_loaded: {body.get('tts_loaded')} (expect False - no IITM checkpoint)")
+print(f"  tts_loaded (Piper): {body.get('tts_loaded')}")
 
 # ---------------- A2/A3. Piper TTS downloaded langs ----------------
 for lang, text in [("te-IN", "నమస్తే telugu"), ("hi-IN", "नमस्ते हिंदी")]:
@@ -139,13 +139,6 @@ if st == 200:
     ok, nbytes, dur = wav_valid(body.get("audio_base64", ""), "long-text")
     check(ok, "long text produces valid WAV")
 
-# ---------------- A8. IITM endpoint intact (503, no checkpoint) ----------------
-print("== A8. IITM /api/v1/tts intact (no checkpoint -> 503) ==")
-st, body = req("POST", "/api/v1/tts", {"text": "namaste", "target_lang": "te-IN"})
-check(st == 503, f"IITM tts HTTP 503 (got {st}) - proves IITM untouched & distinct")
-if st == 503:
-    check("language_checkpoint_not_loaded" in str(body.get("detail", {})), "IITM 503 uses checkpoint contract")
-
 # ---------------- A9. Concurrent Piper two languages ----------------
 print("== A9. Concurrent Piper te-IN + hi-IN ==")
 import concurrent.futures
@@ -160,12 +153,6 @@ for lang, st, body in results:
     if st == 200:
         ok, _, _ = wav_valid(body.get("audio_base64", ""), lang)
         check(ok, f"concurrent {lang} valid WAV")
-
-# ---------------- A10. Endpoint distinctness (routing surface) ----------------
-print("== A10. IITM vs Piper endpoints are distinct ==")
-st_iitm, _ = req("POST", "/api/v1/tts", {"text": "x", "target_lang": "te-IN"})
-st_piper, _ = req("POST", "/api/v1/tts/piper", {"text": "x", "target_lang": "te-IN"})
-check(st_iitm == 503 and st_piper == 200, f"IITM=503 & Piper=200 on same lang (got {st_iitm}/{st_piper}) - distinct endpoints")
 
 print(f"\n===== HTTP INTEGRATION: {passed} pass, {failed} fail =====")
 sys.exit(1 if failed else 0)

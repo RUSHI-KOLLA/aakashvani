@@ -21,7 +21,7 @@ const els = {
 const DEFAULTS = {
   mode: 'auto',
   language: 'te-IN',
-  ttsBackend: 'iitm',
+  ttsBackend: 'piper',
   apiKey: '',
   cloudFallback: false,
   ducking: 10,

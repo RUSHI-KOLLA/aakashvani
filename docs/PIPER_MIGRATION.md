@@ -2,32 +2,33 @@
 
 ## Status
 
-Piper ONNX is implemented as a **separate, additive TTS backend**. The existing IITM FastSpeech2-HS + HiFi-GAN implementation is **completely intact** (no code, dependency, checkpoint, or config removed).
+Piper ONNX is the **active TTS engine**. The IITM FastSpeech2-HS + HiFi-GAN pipeline has been removed
+(see `a3a4536` and the IITM removal commit). No IITM code, dependency, checkpoint, or config remains.
 
 | Item | Details |
 |------|---------|
-| New service | `backend/app/services/piper_tts.py` |
+| Active service | `backend/app/services/piper_tts.py` |
 | Model store | `backend/app/services/piper_models.py` |
 | Router | `backend/app/routers/piper.py` |
-| Tests | `backend/tests/test_piper.py` (real Piper models) |
+| Tests | `backend/tests/test_piper.py` (real Piper models), `backend/tests/test_http_integration.py` (live server) |
 | Wiring | `backend/app/main.py` (lifespan + health + router) |
-| Extension | `ttsBackend` setting ('iitm'\|'piper', default 'iitm') + popup UI |
+| Extension | `ttsBackend` setting (default `'piper'`) + popup UI |
 
-## Architecture (unchanged for IITM)
+## Architecture
 
-- `POST /api/v1/tts` → IITM FastSpeech2 + HiFi-GAN (untouched)
-- `POST /api/v1/tts/piper` → Piper ONNX (new, same response shape: `status`, `mode: "piper"`, `language_code`, `duration_seconds`, `audio_base64`)
+- `POST /api/v1/tts/piper` → Piper ONNX TTS (response: `status`, `mode: "piper"`, `language_code`, `duration_seconds`, `audio_base64`)
 - `POST /api/v1/tts/piper/prepare` + `GET /api/v1/tts/piper/prepare/status` → per-language voice download
-- `GET /api/v1/health` → reports `piper_tts_*` and `piper_voices_available`
+- `GET /api/v1/health` → reports `piper_tts_*` and `piper_voices_available` (plus `tts_loaded`/`tts_backend` for extension `PING_ENGINE`)
+- `POST /api/v1/translate` → Sarvam cloud translation (unchanged)
 
-Extension flow: SyncController → `TTS_ONLY` (with `backend`) → service worker → `/api/v1/tts` (IITM) or `/api/v1/tts/piper` (Piper) → base64 WAV → timeline playback + ducking (unchanged). Default `ttsBackend='iitm'` preserves existing behavior exactly.
+Extension flow: SyncController → `TTS_ONLY` (with `backend`, defaults to `'piper'`) → service worker → `/api/v1/tts/piper` → base64 WAV → timeline playback + ducking (unchanged).
 
 ## Dependencies
 
 Python (backend `venv`):
 
 ```
-onnxruntime numpy soundfile piper-tts phonemizer fastapi uvicorn python-dotenv pydantic httpx pyyaml
+onnxruntime numpy soundfile piper-tts phonemizer fastapi uvicorn python-dotenv pydantic httpx
 ```
 
 System (already present in this environment): `libespeak-ng` + `espeak-ng-data` (phonemizer uses the shared library via ctypes; the `espeak-ng` binary is NOT required).
@@ -37,7 +38,7 @@ Install:
 cd backend
 python3 -m venv venv
 ./venv/bin/pip install --upgrade pip
-./venv/bin/pip install --no-cache-dir onnxruntime numpy soundfile piper-tts phonemizer fastapi uvicorn python-dotenv pydantic httpx pyyaml
+./venv/bin/pip install --no-cache-dir onnxruntime numpy soundfile piper-tts phonemizer fastapi uvicorn python-dotenv pydantic httpx
 ```
 
 ## Configuration (`backend/.env`, never committed)
@@ -56,7 +57,7 @@ PIPER_TTS_MAX_WORKERS=1
 PIPER_TTS_MAX_CHARS=1200
 ```
 
-IITM env vars (`TTS_CHECKPOINT_BASE_URL`, `TTS_GENDER`, `SARVAM_API_KEY`, ...) are untouched.
+IITM env vars (`TTS_CHECKPOINT_BASE_URL`, `TTS_GENDER`) removed. Sarvam (`SARVAM_API_KEY`, ...) still used for cloud translation.
 
 ## Language → Piper voice mapping
 
@@ -84,14 +85,15 @@ source venv/bin/activate
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Docker: existing `Dockerfile` builds the CPU image; add `espeak-ng`/`espeak-ng-data` and the Piper Python deps to `requirements.txt`/`Dockerfile` for container builds. Checkpoints (IITM + Piper) are mounted, not baked in.
+Docker: `Dockerfile` builds the CPU image with espeak-ng/espeak-ng-data and the Piper Python deps.
+Piper checkpoints are mounted, never baked in.
 
 ## Smoke tests
 
 Real-server verification (run the server, then):
 
 ```bash
-# Health — Piper voices listed, IITM untouched
+# Health — Piper voices listed
 curl -s http://127.0.0.1:8000/api/v1/health | python3 -m json.tool
 
 # Telugu synthesis via Piper (expect 200, mode=piper, valid WAV)
@@ -117,16 +119,14 @@ curl -s .../tts/piper/prepare/status?lang=ml-IN  # -> poll until status=ready
 curl -s -X POST .../tts/piper -d '{"text":"നമസ്കാരം മലയാളം","target_lang":"ml-IN"}' -> 200
 ```
 
-IITM regression: `POST /api/v1/tts` (no checkpoint) still returns 503 exactly as before.
-
 ## Verification performed
 
 - Piper ONNX inference: Telugu/Hindi/Malayalam produce valid 22050 Hz PCM audio (nonzero signal), synthesis ~0.1 s, model load ~0.8 s.
-- Real FastAPI server (uvicorn): `/api/v1/tts/piper` returns valid WAV; missing/unsupported/empty cases return 503/503/400 with the same contract as IITM.
+- Real FastAPI server (uvicorn): `/api/v1/tts/piper` returns valid WAV; missing/unsupported/empty cases return 503/503/400.
 - `backend/tests/test_piper.py`: 47 pass / 0 fail using **real** models downloaded from Hugging Face (Telugu, Hindi synthesis; Malayalam missing-model; Tamil/Kannada unsupported; empty text).
-- Existing IITM tests that can run without downloaded checkpoints: pass.
+- `backend/tests/test_http_integration.py`: live-server integration tests pass.
 - Extension: `node --check` on all modified files passes; existing `test_behavioral.js` + `test_adversarial.js` (96 checks) pass.
-- **Not feasible in this environment**: browser-based extension E2E (no browser), Sarvam cloud translation (no API key), IITM checkpoint download (needs HF `smtiitm` model + GPU/TTS stack). These are pre-existing environmental limits, not regressions.
+- **Not feasible in this environment**: browser-based extension E2E (no browser), Sarvam cloud translation (no API key). These are pre-existing environmental limits, not regressions.
 
 ## Notes
 

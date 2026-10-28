@@ -1,7 +1,7 @@
 """Piper ONNX TTS service (per-language, on demand).
 
 Uses piper-tts (PiperVoice) + phonemizer (espeak-ng) + onnxruntime to turn
-text into a PCM_16 WAV byte payload whose shape matches the IITM TTS contract,
+text into a PCM_16 WAV byte payload whose shape matches the TTS contract,
 so the extension can consume Piper output with no changes.
 
 One language is resident at a time; previously loaded voices are cached so
@@ -37,7 +37,7 @@ _load_lock = threading.Lock()
 _voices: dict = {}  # lang -> PiperVoice (cached after first load)
 
 # Hard cap on synthesis input length to avoid VITS memory blow-up on very long
-# captions. Mirrors the spirit of the IITM 450-char chunking but is looser
+# captions. Mirrors the spirit of the 450-char chunking but is looser
 # because Piper is far lighter; the router still enforces max_length=5000.
 MAX_SYNTH_CHARS = int(os.getenv("PIPER_TTS_MAX_CHARS", "1200"))
 
