@@ -42,27 +42,32 @@ _voices: dict = {}  # lang -> PiperVoice (cached after first load)
 MAX_SYNTH_CHARS = int(os.getenv("PIPER_TTS_MAX_CHARS", "1200"))
 
 
+def _ensure_loaded_locked(lang: str) -> None:
+    """Load (or hot-swap to) the Piper voice for `lang`. Caller MUST hold _load_lock."""
+    if _state["loaded"] and _state["lang"] == lang and _state.get("voice") is not None:
+        return
+    if lang in _voices and _voices.get(lang) is not None:
+        voice = _voices[lang]
+    else:
+        voice = _load_voice(lang)
+        _voices[lang] = voice
+
+    if _state.get("voice") is not None and _state["lang"] != lang:
+        # drop previous language (keep loaded voices cached in _voices)
+        _state["voice"] = None
+
+    _state["voice"] = voice
+    _state["sample_rate"] = int(voice.config.sample_rate)
+    _state["lang"] = lang
+    _state["loaded"] = True
+    _state["backend"] = f"piper-onnx ({lang})"
+    logger.info("Piper TTS [%s] loaded (sr=%d)", lang, _state["sample_rate"])
+
+
 def _ensure_loaded(lang: str) -> None:
-    """Load (or hot-swap to) the Piper voice for `lang`. Caller may run in a thread."""
+    """Public: load (or hot-swap to) the Piper voice for `lang`."""
     with _load_lock:
-        if _state["loaded"] and _state["lang"] == lang and _state.get("voice") is not None:
-            return
-        if lang in _voices and _voices.get(lang) is not None:
-            voice = _voices[lang]
-        else:
-            voice = _load_voice(lang)
-            _voices[lang] = voice
-
-        if _state.get("voice") is not None and _state["lang"] != lang:
-            # drop previous language (keep loaded voices cached in _voices)
-            _state["voice"] = None
-
-        _state["voice"] = voice
-        _state["sample_rate"] = int(voice.config.sample_rate)
-        _state["lang"] = lang
-        _state["loaded"] = True
-        _state["backend"] = f"piper-onnx ({lang})"
-        logger.info("Piper TTS [%s] loaded (sr=%d)", lang, _state["sample_rate"])
+        _ensure_loaded_locked(lang)
 
 
 def _load_voice(lang: str):
@@ -114,15 +119,18 @@ def is_available(lang: str) -> bool:
 
 
 async def synthesize(text: str, target_lang: str) -> tuple[bytes, float]:
-    """Synthesize `text` for `target_lang`, returning (wav_bytes, duration_seconds)."""
+    """Synthesize `text` for `target_lang`, returning (wav_bytes, duration_seconds).
+
+    Load and synthesis run atomically inside a single executor call so concurrent
+    requests for different languages cannot hot-swap the resident voice between
+    loading and synthesizing.
+    """
     if target_lang not in piper_models.PIPER_VOICES:
         raise ValueError(f"Unsupported target language '{target_lang}' for Piper TTS.")
     if not piper_models.is_available(target_lang):
         raise RuntimeError(f"__PIPER_MODEL_MISSING__{target_lang}")
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(_TTS_EXECUTOR, _ensure_loaded, target_lang)
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_TTS_EXECUTOR, _synthesize_sync, text, target_lang)
+    return await loop.run_in_executor(_TTS_EXECUTOR, _synthesize_once, text, target_lang)
 
 
 def _sanitize_text(text: str) -> str:
@@ -145,7 +153,8 @@ def _sanitize_text(text: str) -> str:
     return t
 
 
-def _synthesize_sync(text: str, target_lang: str) -> tuple[bytes, float]:
+def _synthesize_once(text, target_lang):
+    """Load (if needed) then synthesize, atomically, within one executor call."""
     import traceback
     import numpy as np
     import soundfile as sf
@@ -156,11 +165,13 @@ def _synthesize_sync(text: str, target_lang: str) -> tuple[bytes, float]:
         if not cleaned:
             raise ValueError("empty text after sanitization (input was punctuation/whitespace only)")
 
-        voice = _state.get("voice")
-        if voice is None or _state["lang"] != target_lang:
-            raise RuntimeError("Piper TTS not loaded — checkpoint missing or load failed.")
+        with _load_lock:
+            _ensure_loaded_locked(target_lang)
+            voice = _state["voice"]
+            sr = int(_state["sample_rate"])
 
-        sr = int(_state["sample_rate"])
+        if voice is None:
+            raise RuntimeError("Piper TTS not loaded — checkpoint missing or load failed.")
 
         # Piper handles phonemization (espeak-ng) + VITS inference internally.
         chunks = list(voice.synthesize(cleaned))
