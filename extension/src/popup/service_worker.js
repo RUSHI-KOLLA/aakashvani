@@ -71,14 +71,16 @@ async function translateViaOffscreen(payload) {
   });
 }
 
-// ---- TTS (IITM FastSpeech2) ----
-async function synthesizeSpeech(text, language) {
+// ---- TTS (IITM FastSpeech2 or Piper ONNX) ----
+async function synthesizeSpeech(text, language, backend = 'iitm') {
   const engine = await getEngineUrl();
+  const isPiper = backend === 'piper';
+  const path = isPiper ? '/api/v1/tts/piper' : '/api/v1/tts';
   const body = { text, target_lang: language || 'te-IN' };
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
   try {
-    const res = await fetch(`${engine}/api/v1/tts`, {
+    const res = await fetch(`${engine}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -88,8 +90,9 @@ async function synthesizeSpeech(text, language) {
     if (res.status === 503) {
       const err = await res.json().catch(() => ({}));
       const detail = err.detail || {};
+      // checkpoint_missing = voice downloadable (IITM or Piper); piper_voice_missing = no voice exists (permanent)
       if (detail.checkpoint_missing) {
-        prepareCheckpoint(detail.checkpoint_missing).catch(() => {});
+        prepareCheckpoint(detail.checkpoint_missing, backend).catch(() => {});
         throw new Error(`checkpoint_preparing:${detail.checkpoint_missing}`);
       }
       throw new Error(`tts 503: ${JSON.stringify(detail).slice(0, 200)}`);
@@ -105,9 +108,10 @@ async function synthesizeSpeech(text, language) {
   }
 }
 
-async function prepareCheckpoint(lang) {
+async function prepareCheckpoint(lang, backend = 'iitm') {
   const engine = await getEngineUrl();
-  const start = await fetch(`${engine}/api/v1/tts/prepare`, {
+  const isPiper = backend === 'piper';
+  const start = await fetch(`${engine}/api/v1/${isPiper ? 'tts/piper' : 'tts'}/prepare`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ lang }),
@@ -116,10 +120,9 @@ async function prepareCheckpoint(lang) {
   if (!start.ok) return { ok: false, error: startData.detail || `prepare ${start.status}` };
   for (let i = 0; i < 300; i++) {
     await new Promise((r) => setTimeout(r, 2000));
-    // Request per-language status so concurrent downloads don't clobber each other
-    const st = await fetch(`${engine}/api/v1/tts/prepare/status?lang=${encodeURIComponent(lang)}`).then((r) => r.json()).catch(() => null);
+    const st = await fetch(`${engine}/api/v1/${isPiper ? 'tts/piper' : 'tts'}/prepare/status?lang=${encodeURIComponent(lang)}`).then((r) => r.json()).catch(() => null);
     if (!st) continue;
-    chrome.runtime.sendMessage({ type: 'CHECKPOINT_PROGRESS', lang, status: st.status, progress: st.progress, error: st.error }).catch(() => {});
+    chrome.runtime.sendMessage({ type: 'CHECKPOINT_PROGRESS', lang, backend, status: st.status, progress: st.progress, error: st.error }).catch(() => {});
     if (st.status === 'ready') return { ok: true };
     if (st.status === 'error') return { ok: false, error: st.error };
   }
@@ -150,7 +153,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse(result);
 
       } else if (msg.type === 'TTS_ONLY') {
-        const tts = await synthesizeSpeech(msg.text, msg.language);
+        const tts = await synthesizeSpeech(msg.text, msg.language, msg.backend);
         sendResponse({ ok: true, audio: tts.audio_base64, duration: tts.duration_seconds });
 
       } else {

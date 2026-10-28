@@ -185,7 +185,7 @@ class TimelineScheduler {
 
 class SyncController {
   constructor() {
-    this.settings = { ducking: 10, mode: 'auto' };
+    this.settings = { ducking: 10, mode: 'auto', ttsBackend: 'iitm' };
     this.queue = [];
     this.inflight = [];
     this.playing = false;
@@ -204,7 +204,7 @@ class SyncController {
     this._ttsCache = new Map();
     this._cacheMax = 50;
 
-    chrome.storage.local.get(['ducking', 'mode'], (s) => { this.settings = { ...this.settings, ...s }; });
+    chrome.storage.local.get(['ducking', 'mode', 'ttsBackend'], (s) => { this.settings = { ...this.settings, ...s }; });
     chrome.storage.onChanged.addListener((ch) => {
       if (ch.ducking) this.settings.ducking = ch.ducking.newValue;
       if (ch.mode) {
@@ -339,7 +339,7 @@ class SyncController {
     if (!audioBase64) {
       let tts;
       try {
-        tts = await chrome.runtime.sendMessage({ type: 'TTS_ONLY', text: translated, language: lang });
+        tts = await chrome.runtime.sendMessage({ type: 'TTS_ONLY', text: translated, language: lang, backend: this.settings.ttsBackend || 'iitm' });
       } catch (e) {
         if (genAtStart !== undefined && genAtStart !== this._generation) return null;
         console.warn(`[AakashVani] TTS transport error:`, e.message);
@@ -378,7 +378,7 @@ class SyncController {
     for (const item of buffer) {
       if (item.genAtStart !== this._generation) continue;
       try {
-        const tts = await chrome.runtime.sendMessage({ type: 'TTS_ONLY', text: item.translated, language: this.settings.language || 'te-IN' });
+        const tts = await chrome.runtime.sendMessage({ type: 'TTS_ONLY', text: item.translated, language: this.settings.language || 'te-IN', backend: this.settings.ttsBackend || 'iitm' });
         if (tts && tts.ok && item.genAtStart === this._generation) {
           this.scheduler.addSegment(item.caption, tts.audio);
           this.scheduler.tick();

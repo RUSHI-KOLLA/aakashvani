@@ -10,6 +10,7 @@ const els = {
   videoStatus: $('video-status'),
   mode: $('mode'),
   language: $('language'),
+  ttsEngine: $('tts-engine'),
   apiKey: $('api-key'),
   cloudFallback: $('cloud-fallback'),
   ducking: $('ducking'),
@@ -20,6 +21,7 @@ const els = {
 const DEFAULTS = {
   mode: 'auto',
   language: 'te-IN',
+  ttsBackend: 'iitm',
   apiKey: '',
   cloudFallback: false,
   ducking: 10,
@@ -95,6 +97,7 @@ async function loadSettings() {
   const settings = { ...DEFAULTS, ...saved };
   els.mode.value = settings.mode;
   els.language.value = settings.language;
+  els.ttsEngine.value = settings.ttsBackend;
   els.apiKey.value = settings.apiKey;
   els.cloudFallback.checked = settings.cloudFallback;
   els.ducking.value = settings.ducking;
@@ -112,6 +115,7 @@ function saveSetting(key, value) {
 function bindEvents() {
   els.mode.addEventListener('change', () => saveSetting('mode', els.mode.value));
   els.language.addEventListener('change', () => saveSetting('language', els.language.value));
+  els.ttsEngine.addEventListener('change', () => saveSetting('ttsBackend', els.ttsEngine.value));
   els.apiKey.addEventListener('change', () => saveSetting('apiKey', els.apiKey.value));
   els.cloudFallback.addEventListener('change', () => saveSetting('cloudFallback', els.cloudFallback.checked));
   els.ducking.addEventListener('input', () => {
