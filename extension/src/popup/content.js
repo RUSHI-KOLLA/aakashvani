@@ -119,10 +119,15 @@
     return readCaptionFromTextTrack() || readCaptionFromDOM();
   }
 
-  // ---- P1-5: Track dispatched cue IDs for correction detection ----
-  // Map<captionId, { text, dispatchTime }> — if we see same ID with different text, it's a correction
+  // ---- P1-5: Track dispatched cue IDs and caption text stability ----
+  // Map<captionId, { text, dispatchTime }> — dispatched captions
   const _dispatchedCues = new Map();
+  // Map<captionId, { text, firstSeenTime }> — stability tracking for incremental
+  // cue growth ("H" → "He" → "Hello"). Only dispatch when text has been stable
+  // for CAPTION_STABILITY_MS so we don't speak incomplete fragments.
+  const _captionStability = new Map();
   const MAX_DISPATCHED_CUES = 50;
+  const CAPTION_STABILITY_MS = 300;
 
   function maybeDispatch(captions) {
     if (!captions || !captions.length) return;
@@ -131,39 +136,49 @@
       return (text || '').trim().replace(/\s+/g, ' ').replace(/[.!?।।…\u0964\u0965]+$/, '');
     }
 
+    const now = Date.now();
+
     for (const caption of captions) {
       const text = (caption.text || '').trim();
       if (!text) continue;
       const normalized = normalizeText(text);
 
-      // ---- P1-5: Correction detection — same cue ID with different text ----
-      // Because _hashCaptionKey no longer includes text, YouTube's incremental
-      // cue growth ("H" → "He" → "Hello") produces the SAME ID. When the text
-      // changes for an already-dispatched cue, invalidate the old segment and
-      // re-dispatch the corrected text instead of treating it as a new caption.
       const prev = _dispatchedCues.get(caption.id);
-      if (prev) {
-        if (normalizeText(prev.text) !== normalized) {
-          controller.invalidateCaption(caption.id);
-          console.log(`[AakashVani] correction detected for ${caption.id}: "${prev.text.slice(0,40)}" → "${text.slice(0,40)}"`);
-          // Allow re-dispatch of the corrected text
-          dispatchedIds.delete(caption.id);
-          _dispatchedTexts.delete(normalizeText(prev.text));
-        } else {
-          // Same cue, same text — don't re-dispatch
+
+      // Same cue, same text as previously dispatched — nothing to do
+      if (prev && normalizeText(prev.text) === normalized) continue;
+
+      // DOM captions (untimed) include text in their ID, so each unique passage
+      // already has its own ID — dispatch immediately without stability wait.
+      // TextTrack cues share one ID across incremental growth — wait for text
+      // stability to avoid speaking incomplete fragments.
+      if (!caption.untimed) {
+        // Track text stability: when was this (id, text) first observed?
+        const stability = _captionStability.get(caption.id);
+        if (!stability || stability.text !== normalized) {
+          // First time seeing this text for this ID — start stability timer
+          _captionStability.set(caption.id, { text: normalized, firstSeenTime: now });
+          continue; // Don't dispatch yet — wait for text to stabilize
+        }
+
+        // Same text as stability tracker — check if stable long enough
+        if (now - stability.firstSeenTime < CAPTION_STABILITY_MS) {
+          // Not stable yet — wait for more observations
           continue;
         }
       }
 
-      // ---- Secondary dedup: same normalized text within 1s window (different cue) ----
-      const now = Date.now();
-      const prevTextTime = _dispatchedTexts.get(normalized);
-      if (prevTextTime && (now - prevTextTime) < 1000) continue;
+      // Text has been stable long enough — dispatch
+      if (prev) {
+        // This is a genuine correction — invalidate old segment
+        controller.invalidateCaption(caption.id);
+        console.log(`[AakashVani] correction detected for ${caption.id}: "${prev.text.slice(0,40)}" → "${text.slice(0,40)}"`);
+      }
 
-      // ---- P0-3: Enqueue EACH cue with its own timing and ID ----
       dispatchedIds.add(caption.id);
       _dispatchedTexts.set(normalized, now);
       _dispatchedCues.set(caption.id, { text, dispatchTime: now });
+      _captionStability.delete(caption.id);
 
       // Bound the maps
       if (_dispatchedCues.size > MAX_DISPATCHED_CUES) {
@@ -195,6 +210,20 @@
     debounce = setTimeout(() => {
       const now = readCaption();
       if (!now || !now.length) return;
+      // When the debounce fires, treat all currently-observed captions as
+      // stable enough to dispatch. This handles the case where a caption
+      // appears once and is already complete (no follow-up observation to
+      // confirm stability).
+      const debounceNow = Date.now();
+      for (const caption of now) {
+        const text = (caption.text || '').trim();
+        if (!text) continue;
+        const normalized = normalizeText(text);
+        const stability = _captionStability.get(caption.id);
+        if (!stability) {
+          _captionStability.set(caption.id, { text: normalized, firstSeenTime: debounceNow - CAPTION_STABILITY_MS });
+        }
+      }
       maybeDispatch(now);
     }, STABILITY_MS);
   }
@@ -258,6 +287,7 @@
       lastDispatched = '';
       dispatchedIds.clear();
       _dispatchedTexts.clear();
+      _captionStability.clear();
       clearTimeout(debounce);
       _dispatchedCues.clear();
       controller.flush();
@@ -277,6 +307,7 @@
     lastDispatched = '';
     dispatchedIds.clear();
     _dispatchedTexts.clear();
+    _captionStability.clear();
     clearTimeout(debounce);
     _dispatchedCues.clear();
     bindVideo();

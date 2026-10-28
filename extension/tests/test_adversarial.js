@@ -218,6 +218,14 @@ section('INV-13: Progressive caption growth — no duplicate dispatches');
   const dispatchedIds = new Set();
   const _dispatchedCues = new Map();  // id → { text, dispatchTime }
   const _dispatchedTexts = new Map(); // normalized text → time
+  const _captionStability = new Map(); // id → { text, firstSeenTime } — stability tracking
+
+  const CAPTION_STABILITY_MS = 300;
+
+  // Mock Date.now for time-controlled testing
+  let fakeNow = 0;
+  const origNow = Date.now;
+  Date.now = () => fakeNow;
 
   function normalizeText(text) {
     return (text || '').trim().replace(/\s+/g, ' ').replace(/[.!?।।…\u0964\u0965]+$/, '');
@@ -233,35 +241,68 @@ section('INV-13: Progressive caption growth — no duplicate dispatches');
     const normalized = normalizeText(text);
 
     const prev = _dispatchedCues.get(caption.id);
-    if (prev) {
-      if (normalizeText(prev.text) !== normalized) {
-        invalidateCaption(caption.id);   // correction: replace old with new
-      } else {
-        return;                          // same cue, same text — skip
-      }
+
+    // Same cue, same text as previously dispatched — nothing to do
+    if (prev && normalizeText(prev.text) === normalized) return;
+
+    // Track text stability: when was this (id, text) first observed?
+    const stability = _captionStability.get(caption.id);
+    if (!stability || stability.text !== normalized) {
+      // First time seeing this text for this ID — start stability timer
+      _captionStability.set(caption.id, { text: normalized, firstSeenTime: fakeNow });
+      return; // Don't dispatch yet — wait for text to stabilize
     }
 
-    const now = Date.now();
-    const prevTextTime = _dispatchedTexts.get(normalized);
-    if (prevTextTime && (now - prevTextTime) < 1000) return;
+    // Same text as stability tracker — check if stable long enough
+    if (fakeNow - stability.firstSeenTime < CAPTION_STABILITY_MS) {
+      // Not stable yet — wait for more observations
+      return;
+    }
+
+    // Text has been stable long enough — dispatch
+    if (prev) {
+      // This is a genuine correction — invalidate old segment
+      invalidateCaption(caption.id);
+    }
 
     dispatchedIds.add(caption.id);
-    _dispatchedTexts.set(normalized, now);
-    _dispatchedCues.set(caption.id, { text: caption.text, dispatchTime: now });
+    _dispatchedTexts.set(normalized, fakeNow);
+    _dispatchedCues.set(caption.id, { text, dispatchTime: fakeNow });
+    _captionStability.delete(caption.id);
     dispatched.push(caption);
   }
 
   // Simulate YouTube incremental rendering of ONE cue at 10.0-13.0s
-  const growth = ["W", "Wel", "Welcome", "Welcome to", "Welcome to Delhi"];
-  for (const t of growth) {
-    maybeDispatch(makeTestCaption(t, 10.0, 13.0));
+  // Each growth step is observed at a different time; text stabilizes at the end.
+  const growth = [
+    { text: "W",           t: 0  },
+    { text: "Wel",         t: 50 },
+    { text: "Welcome",     t: 100 },
+    { text: "Welcome to",  t: 150 },
+    { text: "Welcome to Delhi", t: 200 },
+    // After text stabilizes, another observation confirms it:
+    { text: "Welcome to Delhi", t: 550 },
+  ];
+
+  for (const step of growth) {
+    fakeNow = step.t;
+    maybeDispatch(makeTestCaption(step.text, 10.0, 13.0));
   }
 
-  assertEq(dispatched.length, growth.length, 'each growth step dispatched once as correction (not as duplicate)');
-  assertEq(dispatched[dispatched.length - 1].text, 'Welcome to Delhi', 'final text is the last dispatched');
-  // Each new dispatch invalidates the previous: only the final text remains valid
+  // Exactly one dispatch — the final stable text
+  assertEq(dispatched.length, 1, 'only final stable text dispatched (not each growth step)');
+  assertEq(dispatched[0].text, 'Welcome to Delhi', 'final text is the one dispatched');
+  // All growth steps share one ID (same cue)
   const finalIds = new Set(dispatched.map(d => d.id));
   assertEq(finalIds.size, 1, 'all growth steps share one ID (same cue)');
+  // No intermediate fragments dispatched
+  const texts = dispatched.map(d => d.text);
+  assert(!texts.includes("W"), '"W" fragment not dispatched');
+  assert(!texts.includes("Wel"), '"Wel" fragment not dispatched');
+  assert(!texts.includes("Welcome"), '"Welcome" fragment not dispatched');
+
+  // Restore Date.now
+  Date.now = origNow;
   console.log('INV-13: PASS');
 }
 
