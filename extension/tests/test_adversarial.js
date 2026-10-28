@@ -17,11 +17,14 @@ function assertEq(a, b, msg) {
 }
 function section(name) { console.log(`\n=== ${name} ===`); }
 
-// Extract pure functions from content.js (updated for timing-only ID — text excluded)
-function _hashCaptionKey(startTime, endTime) {
+// Extract pure functions from content.js
+// _hashCaptionKey includes text only when provided (untimed DOM captions pass text
+// so each unique passage gets its own ID; TextTrack cues omit text so incremental
+// cue growth keeps a stable ID).
+function _hashCaptionKey(startTime, endTime, text = '') {
   const normStart = Math.round(startTime * 10) / 10;  // 100ms precision
   const normEnd = Math.round(endTime * 10) / 10;
-  const raw = `${normStart.toFixed(1)}|${normEnd.toFixed(1)}`;
+  const raw = `${normStart.toFixed(1)}|${normEnd.toFixed(1)}|${text}`;
   let h = 0;
   for (let i = 0; i < raw.length; i++) {
     h = ((h << 5) - h + raw.charCodeAt(i)) | 0;
@@ -38,7 +41,7 @@ function makeCaption(cue, source = 'texttrack') {
 }
 
 function makeUntimedCaption(text, source = 'dom') {
-  const key = _hashCaptionKey(0, 0);
+  const key = _hashCaptionKey(0, 0, text);
   return { id: `${source}-untimed-${key}`, text, startTime: null, endTime: null, duration: null, source, untimed: true, capturedAt: Date.now() };
 }
 

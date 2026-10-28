@@ -29,10 +29,13 @@
   // incremental growth would produce a NEW ID and bypass all dedup, dispatching the
   // same caption repeatedly as it grows. With timing-only IDs, the same cue keeps
   // one ID across text growth, and text changes are handled as corrections below.
-  function _hashCaptionKey(startTime, endTime) {
+  // `text` is included in the hash only for untimed DOM captions, where each
+  // unique passage needs its own ID. TextTrack cues call this without text so
+  // that incremental cue growth ("H" → "He" → "Hello") keeps a stable ID.
+  function _hashCaptionKey(startTime, endTime, text = '') {
     const normStart = Math.round(startTime * 10) / 10;  // 100ms precision
     const normEnd = Math.round(endTime * 10) / 10;
-    const raw = `${normStart.toFixed(1)}|${normEnd.toFixed(1)}`;
+    const raw = `${normStart.toFixed(1)}|${normEnd.toFixed(1)}|${text}`;
     let h = 0;
     for (let i = 0; i < raw.length; i++) {
       h = ((h << 5) - h + raw.charCodeAt(i)) | 0;
@@ -62,8 +65,15 @@
   // `startTime` is the video's currentTime at capture time (passed by the caller),
   // so the scheduler can schedule playback at the correct video position instead of
   // at TTS-completion time (which would be delayed by network+TTS latency).
+  //
+  // Unlike TextTrack cues (which grow incrementally and must keep a stable ID),
+  // DOM captions are distinct passages — each unique text needs its own ID so
+  // they are not mistaken for corrections of one another. Including text in the
+  // hash prevents every untimed caption from colliding on dom-untimed-gsm0o8,
+  // which previously caused each new caption to invalidate the previous one
+  // and cut audio off mid-play.
   function makeUntimedCaption(text, source = 'dom', startTime = null) {
-    const key = _hashCaptionKey(0, 0);
+    const key = _hashCaptionKey(0, 0, text);
     return {
       id: `${source}-untimed-${key}`,
       text,
