@@ -14,6 +14,10 @@
   const STABILITY_MS = 250;
   const PUNCT_RE = /[.?!।।…\u0964\u0965]$/;
   let lastDispatched = '';
+
+  function normalizeText(text) {
+    return (text || '').trim().replace(/\s+/g, ' ').replace(/[.!?।।…\u0964\u0965]+$/, '');
+  }
   let dispatchedIds = new Set(); // Track dispatched caption IDs for per-cue dedup
   let _dispatchedTexts = new Map(); // text → timestamp — secondary dedup by normalized text
   let pendingCue = null;
@@ -131,10 +135,6 @@
 
   function maybeDispatch(captions) {
     if (!captions || !captions.length) return;
-
-    function normalizeText(text) {
-      return (text || '').trim().replace(/\s+/g, ' ').replace(/[.!?।।…\u0964\u0965]+$/, '');
-    }
 
     const now = Date.now();
 
