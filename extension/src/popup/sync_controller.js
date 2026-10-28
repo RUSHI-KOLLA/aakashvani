@@ -148,6 +148,10 @@ class TimelineScheduler {
         const playAt = seg.targetStart - TimelineScheduler.AUDIO_LEAD;
         if (now >= playAt) {
           this._playSegment(this.currentIndex);
+        } else {
+          // Play time hasn't arrived yet — start periodic tick so the segment
+          // plays at the correct time even if no caption/TTS event fires.
+          this.startTickMonitor();
         }
         break; // Only play one at a time; next tick will advance
       }
@@ -170,6 +174,14 @@ class TimelineScheduler {
       }
 
       break; // Stop at first non-advanced segment
+    }
+
+    // Stop periodic tick when no segments are pending playback
+    const hasPending = this.segments.some(
+      s => s.state === 'ready' || s.state === 'playing'
+    );
+    if (!hasPending) {
+      this.stopTickMonitor();
     }
   }
 
