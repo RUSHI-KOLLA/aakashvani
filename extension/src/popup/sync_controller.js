@@ -30,10 +30,13 @@ class TimelineScheduler {
     const seg = this._makeSegment(caption, audioBase64);
     const newText = (caption.text || '').trim().toLowerCase().replace(/[.!?।।…\u0964\u0965]+$/, '');
 
-    // Check for overlapping segments with similar text — discard the older one
+    // Check for overlapping segments with similar text — discard the older one.
+    // Never interrupt a segment that is currently playing; that would cut audio
+    // off midway. Instead, skip the new segment when a playing segment covers
+    // the same time range.
     for (let i = this.segments.length - 1; i >= 0; i--) {
       const existing = this.segments[i];
-      if (existing.state === 'discarded' || existing.state === 'completed') continue;
+      if (existing.state === 'discarded' || existing.state === 'completed' || existing.state === 'playing') continue;
       const existText = (existing.caption.text || '').trim().toLowerCase().replace(/[.!?।।…\u0964\u0965]+$/, '');
       const timeOverlap = Math.abs(existing.targetStart - seg.targetStart) < 1.0;
       const textSimilar = existText === newText || (newText.length > 5 && newText.includes(existText)) || (existText.length > 5 && existText.includes(newText));
@@ -43,6 +46,20 @@ class TimelineScheduler {
         this._cleanupSegment(existing);
         console.log(`[AakashVani] duplicate segment discarded: "${existing.caption.text.slice(0,40)}" (overlap @ ${existing.targetStart.toFixed(1)}s)`);
       }
+    }
+
+    // If a playing segment already covers this time range, don't add a duplicate.
+    const isPlayingOverlap = this.segments.some(s =>
+      s.state === 'playing' &&
+      Math.abs(s.targetStart - seg.targetStart) < 1.0 &&
+      ((s.caption.text || '').trim().toLowerCase().replace(/[.!?।।…\u0964\u0965]+$/, '') === newText ||
+       (newText.length > 5 && newText.includes((s.caption.text || '').trim().toLowerCase().replace(/[.!?।।…\u0964\u0965]+$/, ''))) ||
+       ((s.caption.text || '').trim().toLowerCase().replace(/[.!?।।…\u0964\u0965]+$/, '').length > 5 &&
+        (s.caption.text || '').trim().toLowerCase().replace(/[.!?।।…\u0964\u0965]+$/, '').includes(newText)))
+    );
+    if (isPlayingOverlap) {
+      console.log(`[AakashVani] skipping duplicate segment while audio playing: "${seg.caption.text.slice(0,40)}"`);
+      return;
     }
 
     let insertIdx = this.segments.length;
