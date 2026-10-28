@@ -73,42 +73,57 @@ for lang, text in [("te-IN", "నమస్తే telugu"), ("hi-IN", "नमस�
         check(body.get("duration_seconds") is not None, f"{lang} duration_seconds present")
 
 # ---------------- A4. Piper missing model -> prepare -> ready -> synth ----------------
-print("== A4. Piper missing model (kn-IN) then prepare/download/synth ==")
-st, body = req("POST", "/api/v1/tts/piper", {"text": "ನಮಸ್ಕಾರ", "target_lang": "kn-IN"})
-check(st == 503, f"kn-IN synth before download HTTP 503 (got {st})")
+# kn-IN (Kannada) has NO Piper voice -> intentionally unsupported (see A4b).
+print("== A4. Piper missing model (ml-IN) then prepare/download/synth ==")
+st, body = req("POST", "/api/v1/tts/piper", {"text": "നമസ്കാരം മലയാളം", "target_lang": "ml-IN"})
+check(st == 503, f"ml-IN synth before download HTTP 503 (got {st})")
 if st == 503:
-    check(body.get("detail", {}).get("checkpoint_missing") == "kn-IN", "kn-IN 503 has checkpoint_missing=kn-IN")
-    check("prepare_hint" in body.get("detail", {}), "kn-IN 503 has prepare_hint")
+    check(body.get("detail", {}).get("checkpoint_missing") == "ml-IN", "ml-IN 503 has checkpoint_missing=ml-IN")
+    check("prepare_hint" in body.get("detail", {}), "ml-IN 503 has prepare_hint")
 
-st, body = req("POST", "/api/v1/tts/piper/prepare", {"lang": "kn-IN"})
-check(st == 200 and body.get("ok") is True, f"kn-IN prepare started (got {st} {body})")
+st, body = req("POST", "/api/v1/tts/piper/prepare", {"lang": "ml-IN"})
+check(st == 200 and body.get("ok") is True, f"ml-IN prepare started (got {st} {body})")
 
 # poll until ready
 ready = False
 for _ in range(60):
-    st2, b2 = req("GET", "/api/v1/tts/piper/prepare/status?lang=kn-IN")
+    st2, b2 = req("GET", "/api/v1/tts/piper/prepare/status?lang=ml-IN")
     if b2.get("status") == "ready":
         ready = True
         break
     if b2.get("status") == "error":
         break
     time.sleep(2)
-check(ready, "kn-IN download reached 'ready' within 120s")
+check(ready, "ml-IN download reached 'ready' within 120s")
 if ready:
-    st, body = req("POST", "/api/v1/tts/piper", {"text": "ನಮಸ್ಕಾರ ಕನ್ನಡ", "target_lang": "kn-IN"}, timeout=180)
-    check(st == 200, f"kn-IN synth after download HTTP 200 (got {st})")
+    st, body = req("POST", "/api/v1/tts/piper", {"text": "നമസ്കാരം മലയാളം", "target_lang": "ml-IN"}, timeout=180)
+    check(st == 200, f"ml-IN synth after download HTTP 200 (got {st})")
     if st == 200:
-        ok, nbytes, dur = wav_valid(body.get("audio_base64", ""), "kn-IN")
-        check(ok, "kn-IN valid PCM_16 WAV nonzero")
+        ok, nbytes, dur = wav_valid(body.get("audio_base64", ""), "ml-IN")
+        check(ok, "ml-IN valid PCM_16 WAV nonzero")
 
-# ---------------- A5. Piper unsupported language ta-IN ----------------
-print("== A5. Piper unsupported language ta-IN ==")
+# ---------------- A4b. Piper unsupported language kn-IN (Kannada: no voice exists) ----------------
+print("== A4b. Piper unsupported language kn-IN (Kannada) ==")
+st, body = req("POST", "/api/v1/tts/piper", {"text": "ನಮಸ್ಕಾರ", "target_lang": "kn-IN"})
+check(st == 503, f"kn-IN HTTP 503 (got {st})")
+if st == 503:
+    d = body.get("detail", {})
+    check(d.get("piper_voice_missing") == "kn-IN", f"kn-IN piper_voice_missing=kn-IN (got {d.get('piper_voice_missing')})")
+    check("supported" in d, "kn-IN 503 lists supported voices")
+    check("kn-IN" not in d.get("supported", []), "kn-IN not listed as supported")
+
+st, body = req("POST", "/api/v1/tts/piper/prepare", {"lang": "kn-IN"})
+check(st == 400 and body.get("ok") is not True, f"kn-IN prepare rejected (got {st} {body})")
+
+# ---------------- A5. Piper unsupported language ta-IN (Tamil: no voice exists) ----------------
+print("== A5. Piper unsupported language ta-IN (Tamil) ==")
 st, body = req("POST", "/api/v1/tts/piper", {"text": "வணக்கம்", "target_lang": "ta-IN"})
 check(st == 503, f"ta-IN HTTP 503 (got {st})")
 if st == 503:
     d = body.get("detail", {})
     check(d.get("piper_voice_missing") == "ta-IN", f"ta-IN piper_voice_missing=ta-IN (got {d.get('piper_voice_missing')})")
     check("supported" in d, "ta-IN 503 lists supported voices")
+    check("ta-IN" not in d.get("supported", []), "ta-IN not listed as supported")
 
 # ---------------- A6. Piper empty/punct text -> 400 ----------------
 print("== A6. Piper empty/punct text -> 400 ==")

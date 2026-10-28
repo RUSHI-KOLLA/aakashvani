@@ -37,12 +37,48 @@ def wait_available(lang, timeout=120):
 
 
 def test_piper_voice_info():
-    info = piper_models.voice_info("te-IN")
-    assert_(info is not None, "te-IN voice info present")
-    assert_(info["stem"] == "te_IN-maya-medium", "te-IN stem correct")
-    assert_(piper_models.voice_info("ta-IN") is None, "ta-IN has no Piper voice (missing-model scenario)")
-    assert_("te-IN" in piper_models.PIPER_VOICES, "te-IN in PIPER_VOICES")
+    # te/hi/ml/mr have configured Piper voices
+    for lang, expected_stem in [
+        ("te-IN", "te_IN-maya-medium"),
+        ("hi-IN", "hi_IN-pratham-medium"),
+        ("ml-IN", "ml_IN-arjun-medium"),
+        ("mr-IN", "mr_IN-google-medium"),
+    ]:
+        info = piper_models.voice_info(lang)
+        assert_(info is not None, f"{lang} voice info present")
+        assert_(info["stem"] == expected_stem, f"{lang} stem correct ({info['stem'] if info else None})")
+    # ta-IN (Tamil) and kn-IN (Kannada) have NO Piper voice -> explicitly unsupported
+    assert_(piper_models.voice_info("ta-IN") is None, "ta-IN has no Piper voice (unsupported)")
+    assert_(piper_models.voice_info("kn-IN") is None, "kn-IN has no Piper voice (unsupported; was mis-mapped to Georgian ka_GE)")
+    assert_("kn-IN" not in piper_models.PIPER_VOICES, "kn-IN removed from PIPER_VOICES (no Kannada voice exists)")
+    assert_("ta-IN" not in piper_models.PIPER_VOICES, "ta-IN not in PIPER_VOICES")
     print(f"  configured voices: {sorted(piper_models.PIPER_VOICES.keys())}")
+
+
+def test_piper_language_voice_mapping_correctness():
+    """Regression: every configured voice's config.json language.family must match the app lang code.
+
+    This is the test that catches the kn-IN -> ka_GE (Georgian) mis-mapping:
+    family "ka" != app code "kn". Without it, an unrelated voice would be used silently.
+    """
+    mismatches = []
+    for lang in sorted(piper_models.PIPER_VOICES):
+        cfg = piper_models.voice_config(lang)
+        assert_(cfg is not None, f"{lang}: voice config fetchable")
+        if cfg is None:
+            continue
+        family = (cfg.get("language") or {}).get("family")
+        expected = lang.split("-")[0]
+        name = (cfg.get("language") or {}).get("name_english")
+        if family != expected:
+            mismatches.append(f"{lang} -> family={family} ({name}), expected {expected}")
+    assert_(not mismatches, "language-to-voice mapping correct for all configured voices"
+            + ("; mismatches: " + "; ".join(mismatches) if mismatches else ""))
+    for lang in sorted(piper_models.PIPER_VOICES):
+        cfg = piper_models.voice_config(lang)
+        family = (cfg.get("language") or {}).get("family")
+        name = (cfg.get("language") or {}).get("name_english")
+        print(f"  {lang} -> {family} ({name})")
 
 
 def test_piper_prepare_downloads_real_model():
@@ -92,20 +128,26 @@ def test_piper_synthesize_real_hindi():
 
 
 def test_piper_missing_model_scenario():
-    # kn-IN has a Piper voice configured but model NOT downloaded -> __PIPER_MODEL_MISSING__
-    assert_("kn-IN" in piper_models.PIPER_VOICES, "kn-IN voice is configured")
+    # ml-IN (Malayalam) has a Piper voice configured but model NOT downloaded -> __PIPER_MODEL_MISSING__
+    assert_("ml-IN" in piper_models.PIPER_VOICES, "ml-IN voice is configured")
     # Guarantee the missing state (hermetic: prior E2E runs may have downloaded it)
-    _remove_voice_files("kn-IN")
-    assert_(not piper_models.is_available("kn-IN"), "kn-IN model not downloaded yet")
+    _remove_voice_files("ml-IN")
+    assert_(not piper_models.is_available("ml-IN"), "ml-IN model not downloaded yet")
     import asyncio
     try:
-        asyncio.run(piper_tts.synthesize("ನಮಸ್ಕಾರ", "kn-IN"))
-        assert_(False, "expected RuntimeError for kn-IN missing model")
+        asyncio.run(piper_tts.synthesize("നമസ്കാരം മലയാളം", "ml-IN"))
+        assert_(False, "expected RuntimeError for ml-IN missing model")
     except RuntimeError as exc:
-        assert_("__PIPER_MODEL_MISSING__kn-IN" in str(exc), f"missing-model error raised: {exc}")
-    # ta-IN has NO Piper voice configured at all -> unsupported (ValueError), permanent
-    assert_(not piper_models.is_available("ta-IN"), "ta-IN unavailable (no Piper voice)")
-    assert_("ta-IN" not in piper_models.PIPER_VOICES, "ta-IN not in PIPER_VOICES")
+        assert_("__PIPER_MODEL_MISSING__ml-IN" in str(exc), f"missing-model error raised: {exc}")
+    # ta-IN and kn-IN have NO Piper voice configured at all -> unsupported (ValueError), permanent
+    for lang in ("ta-IN", "kn-IN"):
+        assert_(not piper_models.is_available(lang), f"{lang} unavailable (no Piper voice)")
+        assert_(lang not in piper_models.PIPER_VOICES, f"{lang} not in PIPER_VOICES")
+        try:
+            asyncio.run(piper_tts.synthesize("hi", lang))
+            assert_(False, f"expected ValueError for unsupported {lang}")
+        except ValueError as exc:
+            assert_("Unsupported target language" in str(exc), f"{lang} unsupported error: {exc}")
 
 
 def _remove_voice_files(lang: str):
@@ -118,11 +160,19 @@ def _remove_voice_files(lang: str):
 
 def test_piper_unsupported_lang():
     import asyncio
+    # fully unknown language code
     try:
         asyncio.run(piper_tts.synthesize("hi", "xx-YY"))
         assert_(False, "expected ValueError for unsupported lang")
     except ValueError as exc:
         assert_("Unsupported target language" in str(exc), f"unsupported lang error: {exc}")
+    # app-supported language with no Piper voice (kn-IN / ta-IN)
+    for lang in ("kn-IN", "ta-IN"):
+        try:
+            asyncio.run(piper_tts.synthesize("hi", lang))
+            assert_(False, f"expected ValueError for unsupported {lang}")
+        except ValueError as exc:
+            assert_("Unsupported target language" in str(exc), f"{lang} unsupported: {exc}")
 
 
 def test_piper_empty_text():
@@ -137,6 +187,7 @@ def test_piper_empty_text():
 
 if __name__ == "__main__":
     test_piper_voice_info()
+    test_piper_language_voice_mapping_correctness()
     test_piper_prepare_downloads_real_model()
     test_piper_synthesize_real_telugu()
     test_piper_synthesize_real_hindi()

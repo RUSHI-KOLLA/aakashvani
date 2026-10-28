@@ -10,7 +10,8 @@ Ran against a live uvicorn server (`http://127.0.0.1:8000`), Piper models downlo
 | A1 | `GET /api/v1/health` reports `piper_tts_*`, `piper_voices_available`, IITM fields intact | PASS |
 | A2 | Piper TTS te-IN → 200, mode=piper, valid PCM_16 WAV 22050Hz, nonzero audio | PASS |
 | A3 | Piper TTS hi-IN → 200, valid PCM_16 WAV 22050Hz | PASS |
-| A4 | kn-IN missing → 503 `checkpoint_missing`; `POST /prepare` → download → ready → 200 valid WAV | PASS |
+| A4 | ml-IN missing → 503 `checkpoint_missing`; `POST /prepare` → download → ready → 200 valid WAV | PASS |
+| A4b | kn-IN unsupported (no Kannada voice) → 503 `piper_voice_missing`, prepare rejected 400 | PASS |
 | A5 | ta-IN (unsupported, no Piper voice) → 503 `piper_voice_missing` + supported list | PASS |
 | A6 | empty/punct text → 400 | PASS |
 | A7 | long text (>1200 chars) → 200 valid WAV (truncation) | PASS |

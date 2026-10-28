@@ -60,14 +60,19 @@ IITM env vars (`TTS_CHECKPOINT_BASE_URL`, `TTS_GENDER`, `SARVAM_API_KEY`, ...) a
 
 ## Language → Piper voice mapping
 
-| Lang | Voice (rhasspy/piper-voices) |
-|------|------------------------------|
-| te-IN | te_IN-maya-medium |
-| hi-IN | hi_IN-pratham-medium |
-| kn-IN | ka_GE-natia-medium |
-| ml-IN | ml_IN-arjun-medium |
-| mr-IN | mr_IN-google-medium |
-| ta-IN | **none** (no Piper voice → permanent 503; exercises missing-model path) |
+| Lang | Voice (rhasspy/piper-voices) | Status |
+|------|------------------------------|--------|
+| te-IN | te_IN-maya-medium | Telugu ✓ verified |
+| hi-IN | hi_IN-pratham-medium | Hindi ✓ verified |
+| ml-IN | ml_IN-arjun-medium | Malayalam ✓ verified |
+| mr-IN | mr_IN-google-medium | Marathi ✓ verified |
+| kn-IN | **none** | Kannada — no Piper voice exists in rhasspy/piper-voices (unsupported; 503 `piper_voice_missing`) |
+| ta-IN | **none** | Tamil — no Piper voice exists in rhasspy/piper-voices (unsupported; 503 `piper_voice_missing`) |
+
+**Language-to-voice correctness is enforced by** `backend/tests/test_piper_language_voice_mapping_correctness()`:
+each configured voice's `config.json` `language.family` must equal the app language code. This caught a
+`kn-IN → ka_GE-natia-medium` mis-mapping (`ka_GE` is Georgian, not Kannada) — the offending mapping was
+removed rather than silently using an unrelated voice.
 
 Models (~40–65 MB each) download on demand via `POST /api/v1/tts/piper/prepare {"lang":"<code>"}}` and are cached under `PIPER_MODEL_DIR`.
 
@@ -106,19 +111,19 @@ curl -s -o /dev/null -w "%{http_code}" -X POST ... -d '{"text":"வணக்க�
 # Empty text -> 400
 curl -s -o /dev/null -w "%{http_code}" -X POST ... -d '{"text":"   ","target_lang":"te-IN"}' -> 400
 
-# Download a voice (kn-IN) then synthesize
-curl -s -X POST .../tts/piper/prepare -d '{"lang":"kn-IN"}'   # -> started
-curl -s .../tts/piper/prepare/status?lang=kn-IN  # -> poll until status=ready
-curl -s -X POST .../tts/piper -d '{"text":"ನಮಸ್ಕಾರ","target_lang":"kn-IN"}' -> 200
+# Download a voice (ml-IN) then synthesize
+curl -s -X POST .../tts/piper/prepare -d '{"lang":"ml-IN"}'   # -> started
+curl -s .../tts/piper/prepare/status?lang=ml-IN  # -> poll until status=ready
+curl -s -X POST .../tts/piper -d '{"text":"നമസ്കാരം മലയാളം","target_lang":"ml-IN"}' -> 200
 ```
 
 IITM regression: `POST /api/v1/tts` (no checkpoint) still returns 503 exactly as before.
 
 ## Verification performed
 
-- Piper ONNX inference: Telugu/Hindi/Kannada produce valid 22050 Hz PCM audio (nonzero signal), synthesis ~0.1 s, model load ~0.8 s.
+- Piper ONNX inference: Telugu/Hindi/Malayalam produce valid 22050 Hz PCM audio (nonzero signal), synthesis ~0.1 s, model load ~0.8 s.
 - Real FastAPI server (uvicorn): `/api/v1/tts/piper` returns valid WAV; missing/unsupported/empty cases return 503/503/400 with the same contract as IITM.
-- `backend/tests/test_piper.py`: 28 pass / 0 fail using **real** models downloaded from Hugging Face (Telugu, Hindi synthesis; Tamil/Kannada missing-model; unsupported language; empty text).
+- `backend/tests/test_piper.py`: 47 pass / 0 fail using **real** models downloaded from Hugging Face (Telugu, Hindi synthesis; Malayalam missing-model; Tamil/Kannada unsupported; empty text).
 - Existing IITM tests that can run without downloaded checkpoints: pass.
 - Extension: `node --check` on all modified files passes; existing `test_behavioral.js` + `test_adversarial.js` (96 checks) pass.
 - **Not feasible in this environment**: browser-based extension E2E (no browser), Sarvam cloud translation (no API key), IITM checkpoint download (needs HF `smtiitm` model + GPU/TTS stack). These are pre-existing environmental limits, not regressions.

@@ -31,12 +31,18 @@ MODELS_ROOT = Path(
 )
 
 # app lang id -> (hf relative voice dir, model file stem)
-# NOTE: ta-IN (Tamil) has NO Piper voice in rhasspy/piper-voices — intentionally
-# omitted so missing-model / unsupported-language behavior can be exercised.
+#
+# Language-to-voice correctness is enforced by test_piper_language_voice_mapping_correctness():
+# each configured voice's config.json language.family must equal the app language code.
+#
+# NOTE: ta-IN (Tamil) and kn-IN (Kannada) have NO Piper voice in rhasspy/piper-voices —
+# intentionally omitted so they are reported as explicitly unsupported rather than silently
+# mapped to an unrelated voice (e.g. the Georgian ka_GE voice was previously mis-mapped to kn-IN).
+# Confirmed via the Hugging Face repo tree: Indian-language dirs present are bn, hi, ml, mr, te, ur;
+# kn (Kannada) and ta (Tamil) are absent.
 PIPER_VOICES = {
     "te-IN": ("te/te_IN/maya/medium", "te_IN-maya-medium"),
     "hi-IN": ("hi/hi_IN/pratham/medium", "hi_IN-pratham-medium"),
-    "kn-IN": ("ka/ka_GE/natia/medium", "ka_GE-natia-medium"),
     "ml-IN": ("ml/ml_IN/arjun/medium", "ml_IN-arjun-medium"),
     "mr-IN": ("mr/mr_IN/google/medium", "mr_IN-google-medium"),
 }
@@ -73,6 +79,34 @@ def voice_info(lang: str) -> dict | None:
         return None
     repo_dir, stem = entry
     return {"repo_dir": repo_dir, "stem": stem, "model_file": f"{stem}.onnx", "config_file": f"{stem}.onnx.json"}
+
+
+def voice_config(lang: str) -> dict | None:
+    """Return the parsed .onnx.json config for `lang`'s Piper voice.
+
+    Reads the local config file if the voice is downloaded; otherwise fetches it
+    from the Hugging Face repo. Returns None if no voice is configured for `lang`.
+    The config's ``language.family`` field is the authoritative language identity
+    used by test_piper_language_voice_mapping_correctness().
+    """
+    info = voice_info(lang)
+    if info is None:
+        return None
+    cfg_path = config_path(lang)
+    if cfg_path.exists() and cfg_path.stat().st_size > 0:
+        import json
+        with open(cfg_path) as f:
+            return json.load(f)
+    # Fall back to fetching the config from Hugging Face (no model download).
+    import json
+    import urllib.request
+    repo_url = f"{BASE_URL}/{info['repo_dir']}/{info['stem']}.onnx.json?download=true"
+    try:
+        with urllib.request.urlopen(repo_url, timeout=30) as resp:
+            return json.load(resp)
+    except Exception as exc:
+        logger.warning("could not fetch voice config for %s: %s", lang, exc)
+        return None
 
 
 def model_dir(lang: str) -> Path:
