@@ -20,13 +20,19 @@
   let debounce = null;
   let observer = null;
 
-  // ---- P0-2: Stable caption IDs via hash of timing + text (no counter) ----
+  // ---- P0-2: Stable caption IDs via hash of timing only (no counter, no text) ----
   // Normalize timestamps to 100ms precision so sub-millisecond YouTube re-renders
   // (e.g., 581.731 vs 581.788) produce the SAME ID for the same caption.
-  function _hashCaptionKey(startTime, endTime, text) {
+  //
+  // NOTE: `text` is deliberately EXCLUDED from the hash. YouTube renders TextTrack
+  // cues incrementally ("H" → "He" → "Hello"); if text were part of the ID, each
+  // incremental growth would produce a NEW ID and bypass all dedup, dispatching the
+  // same caption repeatedly as it grows. With timing-only IDs, the same cue keeps
+  // one ID across text growth, and text changes are handled as corrections below.
+  function _hashCaptionKey(startTime, endTime) {
     const normStart = Math.round(startTime * 10) / 10;  // 100ms precision
     const normEnd = Math.round(endTime * 10) / 10;
-    const raw = `${normStart.toFixed(1)}|${normEnd.toFixed(1)}|${text}`;
+    const raw = `${normStart.toFixed(1)}|${normEnd.toFixed(1)}`;
     let h = 0;
     for (let i = 0; i < raw.length; i++) {
       h = ((h << 5) - h + raw.charCodeAt(i)) | 0;
@@ -34,12 +40,12 @@
     return (h >>> 0).toString(36);
   }
 
-  // ---- P0-2 + P0-3: Each cue gets its own stable ID based on its own timing + text ----
+  // ---- P0-2 + P0-3: Each cue gets its own stable ID based on its own timing ----
   function makeCaption(cue, source = 'texttrack') {
     const text = (cue.text || '').trim();
     const startTime = cue.startTime;
     const endTime = cue.endTime;
-    const key = _hashCaptionKey(startTime, endTime, text);
+    const key = _hashCaptionKey(startTime, endTime);
     return {
       id: `${source}-${key}`,
       text,
@@ -53,14 +59,17 @@
   }
 
   // ---- P0-4: DOM fallback — explicitly marked untimed, never fake 0→0 ----
-  function makeUntimedCaption(text, source = 'dom') {
-    const key = _hashCaptionKey(0, 0, text);
+  // `startTime` is the video's currentTime at capture time (passed by the caller),
+  // so the scheduler can schedule playback at the correct video position instead of
+  // at TTS-completion time (which would be delayed by network+TTS latency).
+  function makeUntimedCaption(text, source = 'dom', startTime = null) {
+    const key = _hashCaptionKey(0, 0);
     return {
       id: `${source}-untimed-${key}`,
       text,
-      startTime: null,
-      endTime: null,
-      duration: null,
+      startTime,
+      endTime: startTime != null ? startTime + 3 : null,
+      duration: startTime != null ? 3 : null,
       source,
       untimed: true,
       capturedAt: Date.now(),
@@ -82,15 +91,16 @@
 
   // ---- P0-4: DOM fallback — untimed captions, never fake timestamps ----
   function readCaptionFromDOM() {
+    const v = document.querySelector('video');
     const segs = document.querySelectorAll('.ytp-caption-segment');
     if (segs.length) {
       const text = Array.from(segs).map((s) => s.textContent.trim()).join(' ').trim();
-      if (text) return [makeUntimedCaption(text, 'dom')];
+      if (text) return [makeUntimedCaption(text, 'dom', v ? v.currentTime : null)];
     }
     const win = document.querySelector('.ytp-caption-window-container .caption-visual-line');
     if (win) {
       const text = (win.textContent || '').trim();
-      if (text) return [makeUntimedCaption(text, 'dom')];
+      if (text) return [makeUntimedCaption(text, 'dom', v ? v.currentTime : null)];
     }
     return null;
   }
@@ -116,20 +126,29 @@
       if (!text) continue;
       const normalized = normalizeText(text);
 
-      // Dedup by caption ID (stable) — don't re-dispatch same cue
-      if (dispatchedIds.has(caption.id)) continue;
+      // ---- P1-5: Correction detection — same cue ID with different text ----
+      // Because _hashCaptionKey no longer includes text, YouTube's incremental
+      // cue growth ("H" → "He" → "Hello") produces the SAME ID. When the text
+      // changes for an already-dispatched cue, invalidate the old segment and
+      // re-dispatch the corrected text instead of treating it as a new caption.
+      const prev = _dispatchedCues.get(caption.id);
+      if (prev) {
+        if (normalizeText(prev.text) !== normalized) {
+          controller.invalidateCaption(caption.id);
+          console.log(`[AakashVani] correction detected for ${caption.id}: "${prev.text.slice(0,40)}" → "${text.slice(0,40)}"`);
+          // Allow re-dispatch of the corrected text
+          dispatchedIds.delete(caption.id);
+          _dispatchedTexts.delete(normalizeText(prev.text));
+        } else {
+          // Same cue, same text — don't re-dispatch
+          continue;
+        }
+      }
 
-      // ---- Secondary dedup: same normalized text within 1s window ----
+      // ---- Secondary dedup: same normalized text within 1s window (different cue) ----
       const now = Date.now();
       const prevTextTime = _dispatchedTexts.get(normalized);
       if (prevTextTime && (now - prevTextTime) < 1000) continue;
-
-      // ---- P1-5: Correction detection — same cue ID with different text ----
-      const prev = _dispatchedCues.get(caption.id);
-      if (prev && normalizeText(prev.text) !== normalized) {
-        controller.invalidateCaption(caption.id);
-        console.log(`[AakashVani] correction detected for ${caption.id}: "${prev.text.slice(0,40)}" → "${text.slice(0,40)}"`);
-      }
 
       // ---- P0-3: Enqueue EACH cue with its own timing and ID ----
       dispatchedIds.add(caption.id);

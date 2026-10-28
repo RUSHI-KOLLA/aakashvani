@@ -17,8 +17,10 @@ function section(name) { console.log(`\n--- ${name} ---`); }
 // ============================================================
 // P0-2: Stable caption ID hashing
 // ============================================================
-function _hashCaptionKey(startTime, endTime, text) {
-  const raw = `${startTime.toFixed(6)}|${endTime.toFixed(6)}|${text}`;
+function _hashCaptionKey(startTime, endTime) {
+  const normStart = Math.round(startTime * 10) / 10;
+  const normEnd = Math.round(endTime * 10) / 10;
+  const raw = `${normStart.toFixed(1)}|${normEnd.toFixed(1)}`;
   let h = 0;
   for (let i = 0; i < raw.length; i++) {
     h = ((h << 5) - h + raw.charCodeAt(i)) | 0;
@@ -28,20 +30,20 @@ function _hashCaptionKey(startTime, endTime, text) {
 
 section('P0-2: Stable caption IDs');
 {
-  const id1 = _hashCaptionKey(10.5, 13.2, 'Hello world');
-  const id2 = _hashCaptionKey(10.5, 13.2, 'Hello world');
+  const id1 = _hashCaptionKey(10.5, 13.2);
+  const id2 = _hashCaptionKey(10.5, 13.2);
   assertEq(id1, id2, 'same cue → same ID');
 
-  const id3 = _hashCaptionKey(10.5, 13.2, 'Hello World');
-  assert(id1 !== id3, 'different text → different ID');
+  const id3 = _hashCaptionKey(10.5, 13.2);
+  assertEq(id1, id3, 'same timing → same ID regardless of text');
 
-  const id4 = _hashCaptionKey(10.6, 13.2, 'Hello world');
+  const id4 = _hashCaptionKey(10.6, 13.2);
   assert(id1 !== id4, 'different startTime → different ID');
 
   // Repeated observations of the same cue always produce the same ID
   const ids = [];
   for (let i = 0; i < 10; i++) {
-    ids.push(_hashCaptionKey(5.0, 8.0, 'Test caption'));
+    ids.push(_hashCaptionKey(5.0, 8.0));
   }
   const unique = new Set(ids);
   assertEq(unique.size, 1, '10 repeated observations → all same ID');

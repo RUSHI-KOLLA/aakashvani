@@ -8,9 +8,21 @@ class TimelineScheduler {
     this.currentIndex = 0;
     this.video = null;
     this._monitorTimer = null;
+    this._tickTimer = null;
   }
 
   setVideo(video) { this.video = video; }
+
+  // Start a periodic tick so segments play at their scheduled time even when
+  // no caption/TTS event fires between now and the segment's targetStart.
+  startTickMonitor() {
+    if (this._tickTimer) return;
+    this._tickTimer = setInterval(() => this.tick(), 100);
+  }
+
+  stopTickMonitor() {
+    if (this._tickTimer) { clearInterval(this._tickTimer); this._tickTimer = null; }
+  }
 
   // ---- P0-1: Insert sorted by targetStart — completion order never affects playback order ----
   // ---- Fix 3: Duplicate segment prevention — discard older segment if overlap + similar text ----
@@ -99,6 +111,7 @@ class TimelineScheduler {
       // Large jump = seek; reset to find correct segment
       this.currentIndex = 0;
       this._lastVideoTime = now;
+      this.stopTickMonitor();
       // Fall through to re-evaluate
     }
     this._lastVideoTime = now;
@@ -251,7 +264,11 @@ class SyncController {
       this.scheduler.segments.some(s => (s.caption.id || '') === cid && (s.state === 'ready' || s.state === 'playing' || s.state === 'pending' || s.state === 'completed'));
     if (isDuplicate) return;
     this.queue.push(caption);
-    this.pumpPipeline();
+    // Don't pump TTS while video is paused — avoids generating dubs that would
+    // burst into playback all at once on resume. Pumping resumes in resumeDubbed().
+    if (!this.video || !this.video.paused) {
+      this.pumpPipeline();
+    }
     this.scheduler.tick();
   }
 
@@ -442,6 +459,7 @@ class SyncController {
     if (seg && seg.state === 'playing' && !seg.audio.paused) {
       try { seg.audio.pause(); } catch (_) {}
       this._stopDriftMonitor();
+      this.scheduler.stopTickMonitor();
       console.log('[AakashVani] dub paused (video paused)');
     }
   }
@@ -451,9 +469,12 @@ class SyncController {
     if (seg && seg.state === 'playing' && seg.audio.paused) {
       seg.audio.play().catch(() => {});
       this._startDriftMonitor();
+      this.scheduler.startTickMonitor();
       console.log('[AakashVani] dub resumed');
     } else {
       this.scheduler.tick();
+      this.scheduler.startTickMonitor();
+      this.pumpPipeline();
     }
   }
 

@@ -17,11 +17,11 @@ function assertEq(a, b, msg) {
 }
 function section(name) { console.log(`\n=== ${name} ===`); }
 
-// Extract pure functions from content.js (updated for 100ms timestamp normalization)
-function _hashCaptionKey(startTime, endTime, text) {
+// Extract pure functions from content.js (updated for timing-only ID — text excluded)
+function _hashCaptionKey(startTime, endTime) {
   const normStart = Math.round(startTime * 10) / 10;  // 100ms precision
   const normEnd = Math.round(endTime * 10) / 10;
-  const raw = `${normStart.toFixed(1)}|${normEnd.toFixed(1)}|${text}`;
+  const raw = `${normStart.toFixed(1)}|${normEnd.toFixed(1)}`;
   let h = 0;
   for (let i = 0; i < raw.length; i++) {
     h = ((h << 5) - h + raw.charCodeAt(i)) | 0;
@@ -33,12 +33,12 @@ function makeCaption(cue, source = 'texttrack') {
   const text = (cue.text || '').trim();
   const startTime = cue.startTime;
   const endTime = cue.endTime;
-  const key = _hashCaptionKey(startTime, endTime, text);
+  const key = _hashCaptionKey(startTime, endTime);
   return { id: `${source}-${key}`, text, startTime, endTime, duration: endTime - startTime, source, untimed: false, capturedAt: Date.now() };
 }
 
 function makeUntimedCaption(text, source = 'dom') {
-  const key = _hashCaptionKey(0, 0, text);
+  const key = _hashCaptionKey(0, 0);
   return { id: `${source}-untimed-${key}`, text, startTime: null, endTime: null, duration: null, source, untimed: true, capturedAt: Date.now() };
 }
 
@@ -170,7 +170,10 @@ section('INV-2: Stable caption IDs — 100ms normalization absorbs sub-ms jitter
   for (let i = 0; i < 50; i++) ids.add(makeCaption(cue).id);
   assertEq(ids.size, 1, '50 observations → 1 unique ID');
   assertEq(makeCaption(cue).id, makeCaption(cue).id, 'two separate calls → same ID');
-  assert(makeCaption({ text: 'Different', startTime: 5.123456, endTime: 8.789012 }).id !== makeCaption(cue).id, 'different text → different ID');
+  // Same timing + different text → SAME ID (text excluded from hash; text changes handled as corrections)
+  assertEq(makeCaption({ text: 'Different', startTime: 5.123456, endTime: 8.789012 }).id, makeCaption(cue).id, 'same timing → same ID regardless of text');
+  // Different timing → different ID
+  assert(makeCaption({ text: 'Hello world this is a test', startTime: 6.0, endTime: 9.0 }).id !== makeCaption(cue).id, 'different timing → different ID');
 
   // ---- Fix 1: 100ms normalization — sub-millisecond jitter should produce SAME ID ----
   // Values must round to same 100ms bucket: round(x*10)/10 must be equal
@@ -185,6 +188,78 @@ section('INV-2: Stable caption IDs — 100ms normalization absorbs sub-ms jitter
   const id4 = makeCaption({ text: 'Test caption', startTime: 582.00, endTime: 585.50 }).id;
   assert(id1 !== id4, '581.7 vs 582.0 (>100ms) → different ID');
   console.log('INV-2: PASS');
+}
+
+// ============================================================
+// INV-13: Progressive caption growth — same cue dispatched once, text growth = correction
+// ============================================================
+section('INV-13: Progressive caption growth — no duplicate dispatches');
+{
+  // Simulates the content.js maybeDispatch logic with timing-only IDs.
+  // YouTube renders a single TextTrack cue incrementally: "W" → "Wel" → "Welcome" → ...
+  // Each incremental growth updates cue.text but NOT startTime/endTime.
+  function _hashKey(startTime, endTime) {
+    const normStart = Math.round(startTime * 10) / 10;
+    const normEnd = Math.round(endTime * 10) / 10;
+    const raw = `${normStart.toFixed(1)}|${normEnd.toFixed(1)}`;
+    let h = 0;
+    for (let i = 0; i < raw.length; i++) { h = ((h << 5) - h + raw.charCodeAt(i)) | 0; }
+    return (h >>> 0).toString(36);
+  }
+  function makeTestCaption(text, startTime, endTime) {
+    const key = _hashKey(startTime, endTime);
+    return { id: `tt-${key}`, text, startTime, endTime };
+  }
+
+  const dispatched = [];        // captions sent to TTS
+  const dispatchedIds = new Set();
+  const _dispatchedCues = new Map();  // id → { text, dispatchTime }
+  const _dispatchedTexts = new Map(); // normalized text → time
+
+  function normalizeText(text) {
+    return (text || '').trim().replace(/\s+/g, ' ').replace(/[.!?।।…\u0964\u0965]+$/, '');
+  }
+  function invalidateCaption(cid) {
+    dispatchedIds.delete(cid);
+    _dispatchedCues.delete(cid);
+  }
+
+  function maybeDispatch(caption) {
+    const text = caption.text.trim();
+    if (!text) return;
+    const normalized = normalizeText(text);
+
+    const prev = _dispatchedCues.get(caption.id);
+    if (prev) {
+      if (normalizeText(prev.text) !== normalized) {
+        invalidateCaption(caption.id);   // correction: replace old with new
+      } else {
+        return;                          // same cue, same text — skip
+      }
+    }
+
+    const now = Date.now();
+    const prevTextTime = _dispatchedTexts.get(normalized);
+    if (prevTextTime && (now - prevTextTime) < 1000) return;
+
+    dispatchedIds.add(caption.id);
+    _dispatchedTexts.set(normalized, now);
+    _dispatchedCues.set(caption.id, { text: caption.text, dispatchTime: now });
+    dispatched.push(caption);
+  }
+
+  // Simulate YouTube incremental rendering of ONE cue at 10.0-13.0s
+  const growth = ["W", "Wel", "Welcome", "Welcome to", "Welcome to Delhi"];
+  for (const t of growth) {
+    maybeDispatch(makeTestCaption(t, 10.0, 13.0));
+  }
+
+  assertEq(dispatched.length, growth.length, 'each growth step dispatched once as correction (not as duplicate)');
+  assertEq(dispatched[dispatched.length - 1].text, 'Welcome to Delhi', 'final text is the last dispatched');
+  // Each new dispatch invalidates the previous: only the final text remains valid
+  const finalIds = new Set(dispatched.map(d => d.id));
+  assertEq(finalIds.size, 1, 'all growth steps share one ID (same cue)');
+  console.log('INV-13: PASS');
 }
 
 // ============================================================
