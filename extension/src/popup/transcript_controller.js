@@ -329,50 +329,37 @@ class TranscriptController {
 
     // Detect cue change: if the new caption has a different startTime than the
     // cue that produced the current uncommitted text, treat it as a new cue.
-    // For continuing speech (new cue, later startTime), APPEND to uncommitted
-    // and keep stability timer running. Only commit on phrase boundary/max-wait.
+    // For continuing speech (new cue, later startTime), commit the previous
+    // pending text if stable, then start fresh with the new cue's residual.
     // For corrections (same cue ID), the relation logic below handles replace.
     const isNewCue = startTime != null &&
       this.uncommittedCueStart != null &&
-      startTime > this.uncommittedCueStart + 0.5; // >500ms gap = new cue
+      startTime >= this.uncommittedCueStart + 0.5; // >=500ms gap = new cue
     let didCueChangeAppend = false;
-    if (isNewCue && this.uncommitted) {
-      // Continuing speech: append only the NEW words from the new caption
-      // that aren't already in the uncommitted text.
-      // Use residualWords (words beyond committed prefix) for overlap detection,
-      // not the full newWords, to avoid re-adding already-committed words.
-      const pendingWords = _tokens(this.uncommitted);
-      let overlapLen = 0;
-      const maxOverlap = Math.min(pendingWords.length, residualWords.length);
-      for (let k = maxOverlap; k >= 1; k--) {
-        // Check if last k words of uncommitted match first k words of residual
-        let match = true;
-        for (let i = 0; i < k; i++) {
-          if (_normWord(pendingWords[pendingWords.length - k + i]) !== _normWord(residualWords[i])) {
-            match = false; break;
-          }
+    if (isNewCue) {
+      // New cue arrived: commit the previous pending text if stable.
+      // Then start fresh with the new cue's residual words.
+      if (this.uncommitted) {
+        const stableMs = Date.now() - this.uncommittedFirstSeen;
+        const obsCount = this.uncommittedObservations;
+        const isStable = stableMs >= this.config.MIN_STABILITY_MS && obsCount >= this.config.MIN_OBSERVATIONS;
+        
+        if (isStable) {
+          const committedSegments = this._commitPending(caption, 'cue-change');
+          if (committedSegments) segments.push(...committedSegments);
         }
-        if (match) { overlapLen = k; break; }
+        // If not stable, discard the unstable pending (point 5 in invariants).
+        // The new cue's residual will become the new pending.
       }
-      const newWordsOnly = residualWords.slice(overlapLen);
-      const newTextOnly = newWordsOnly.join(' ');
-      if (newTextOnly) {
-        this.uncommitted = this.uncommitted ? this.uncommitted + ' ' + newTextOnly : newTextOnly;
-        // Stability timer handling for cue changes:
-        // - If uncommittedFirstSeen is 0 (just committed), start fresh timer
-        // - Otherwise, KEEP the existing timer running (continuous speech across cues)
-        // This prevents premature max-wait commits while allowing stability to accumulate.
-        if (this.uncommittedFirstSeen === 0) {
-          this.uncommittedFirstSeen = Date.now();
-          this.uncommittedObservations = 1;
-        } else {
-          // Continuous speech across cues: increment observation count, keep original timer
-          this.uncommittedObservations = (this.uncommittedObservations || 0) + 1;
-        }
-        this.uncommittedCueStart = startTime;
-        this._log('debug', `cue change: appended to pending: ${this.uncommitted.slice(0,40)}`);
-        didCueChangeAppend = true;
-      }
+      
+      // Start fresh with the new cue's residual words (beyond committed prefix).
+      // The committed prefix has been updated (if committed), so residualWords is correct.
+      this.uncommitted = residualText;
+      this.uncommittedFirstSeen = residualText ? Date.now() : 0;
+      this.uncommittedObservations = residualText ? 1 : 0;
+      this.uncommittedCueStart = startTime;
+      this._log('debug', `cue change: ${this.uncommitted ? 'new pending' : 'no pending'} from residual`);
+      didCueChangeAppend = true;
     }
 
     // Relation is judged against the PENDING region (the active speech),
