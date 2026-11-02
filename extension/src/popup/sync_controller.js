@@ -267,30 +267,31 @@ class TimelineScheduler {
 
   _makeSegment(caption, audioBase64) {
     const audio = this._createAudio(audioBase64);
-    // Prefer the caption's captured start time even for DOM (untimed) captions.
-    // content.js records video.currentTime when the caption first appears, so
-    // scheduling from that point compensates for translation/TTS latency.
-    // Only fall back to the current video time when no capture time exists.
+    // SCHEDULE AT READY TIME: Instead of trying to hit the original caption startTime
+    // (which is often already past by the time TTS completes), schedule the dub to play
+    // shortly after it's READY (translation+TTS done). This eliminates the 2-8s lateness.
+    // READY_LEAD = small buffer (500ms) so audio starts smoothly.
+    const READY_LEAD = 0.5; // 500ms from now
+    const now = this.video ? this.video.currentTime : 0;
     let targetStart, targetEnd;
     if (caption.startTime != null) {
-      targetStart = caption.startTime;
-      // Use actual audio duration for targetEnd when available (metadata loaded).
-      // Otherwise fall back to caption.duration or 3s default.
-      // We'll update targetEnd when onloadedmetadata fires.
+      // Use the LATER of: caption's original time (for sync) OR ready time (for low latency)
+      // This prefers ready-time when caption is stale, original time when fresh.
+      const readyTime = now + READY_LEAD;
+      const captionTime = caption.startTime - TimelineScheduler.AUDIO_LEAD;
+      targetStart = Math.max(readyTime, captionTime);
       targetEnd = caption.endTime != null
         ? caption.endTime
         : targetStart + (audio.duration || caption.duration || 3);
     } else {
-      targetStart = this.video ? this.video.currentTime : 0;
+      targetStart = now + READY_LEAD;
       targetEnd = targetStart + (audio.duration || caption.duration || 3);
     }
     // If audio metadata isn't loaded yet, wait for it and update targetEnd.
     if (audio.readyState < 1) { // HAVE_METADATA
       audio.onloadedmetadata = () => {
         if (caption.endTime == null) {
-          // Update targetEnd with actual audio duration
           targetEnd = targetStart + audio.duration;
-          // If segment is already in scheduler, update it
           for (const seg of this.segments) {
             if (seg.caption.id === caption.id && seg.targetEnd !== targetEnd) {
               seg.targetEnd = targetEnd;
@@ -314,8 +315,8 @@ class TimelineScheduler {
       audio,
       targetStart,
       targetEnd,
-      // Preserve the original intended start time for latency tracking
-      originalTargetStart: targetStart,
+      // Preserve the caption's original intended start time for latency tracking
+      originalTargetStart: caption.startTime != null ? caption.startTime - TimelineScheduler.AUDIO_LEAD : now,
       state: 'ready',
       scheduledAt: null,
       targetLanguage,
@@ -796,6 +797,43 @@ class SyncController {
       // Track stale drops (Research #11)
       this.scheduler.onStaleDrop = (schedSeg) => {
         this._resourceStats.staleDrops++;
+      };
+      // Speculative translation: start translate+TTS on growth (new words observed)
+      // to pipeline latency. Audio is cached in _ttsCache and used on commit.
+      this.transcriptController.onSpeculativeTranslate = async (text, caption) => {
+        if (!text || !caption) return;
+        const cacheKey = `${text}|${this.settings.language || 'te-IN'}|${this.settings.ttsBackend || 'piper'}`;
+        if (this._ttsCache.has(cacheKey)) return; // Already cached
+        
+        try {
+          const backend = this.settings.ttsBackend || 'piper';
+          const lang = this.settings.language || 'te-IN';
+          const apiKey = this.settings.apiKey || '';
+          
+          // Translate
+          const translateRes = await chrome.runtime.sendMessage({
+            type: 'TRANSLATE', text, language: lang, mode: this.settings.mode || 'auto', apiKey
+          });
+          if (!translateRes || !translateRes.ok || !translateRes.translated) return;
+          const translated = translateRes.translated;
+          
+          // TTS
+          const ttsRes = await chrome.runtime.sendMessage({
+            type: 'TTS_ONLY', text: translated, language: lang, backend, apiKey
+          });
+          if (!ttsRes || !ttsRes.ok || !ttsRes.audio) return;
+          
+          // Cache the audio for when segment commits
+          if (this._ttsCache.size >= this._cacheMax) {
+            const firstKey = this._ttsCache.keys().next().value;
+            this._ttsCache.delete(firstKey);
+            this._resourceStats.cacheEvictions++;
+          }
+          this._ttsCache.set(cacheKey, ttsRes.audio);
+          console.log(`[AakashVani] speculative TTS cached for: ${text.slice(0,40)}`);
+        } catch (e) {
+          console.warn('[AakashVani] speculative translate failed:', e.message);
+        }
       };
     } else {
       this.transcriptController = null;

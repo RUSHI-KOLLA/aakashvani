@@ -243,9 +243,10 @@ class TranscriptController {
     this._maxCommittedCueTime = null;
 
     // Callbacks (set by SyncController)
-    this.onSegmentReady = null;    // (segment) => Promise<void>  translate+TTS
-    this.onHealthChange = null;    // (health) => void
-    this.onError = null;           // (error) => void
+    this.onSegmentReady = null;        // (segment) => Promise<void>  translate+TTS
+    this.onHealthChange = null;        // (health) => void
+    this.onError = null;               // (error) => void
+    this.onSpeculativeTranslate = null; // (text, caption) => Promise<{audioBase64, durationSeconds}> — start translate+TTS early on growth
   }
 
   // ---------------------------------------------------------------
@@ -409,6 +410,14 @@ class TranscriptController {
       // Cue change append already updated uncommitted; count as growth observation
       relation = 'growth';
       this.uncommittedObservations = (this.uncommittedObservations || 0) + 1;
+    }
+
+    // Speculative translation: start translate+TTS immediately on growth
+    // (new words observed) to pipeline latency. The audio is cached and used
+    // when the segment commits. If the text is later retracted/replaced, the
+    // cached audio is simply not used.
+    if ((relation === 'growth' || relation === 'same') && this.onSpeculativeTranslate) {
+      this.onSpeculativeTranslate(this.uncommitted, caption);
     }
 
     // Genuine repeated speech: identical text at a LATER timed TextTrack cue.

@@ -209,6 +209,8 @@ function createEnv(options = {}) {
     Blob: class Blob { constructor(parts) { this.parts = parts; } },
     atob: (value) => Buffer.from(value, 'base64').toString('binary'),
     Audio: MockAudio,
+    addEventListener: () => {},
+    removeEventListener: () => {},
   };
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
