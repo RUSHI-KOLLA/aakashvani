@@ -2,6 +2,7 @@
 
 Endpoints:
   POST /api/v1/tts/piper                synthesize (auto-loads voice if model present)
+  POST /api/v1/tts/piper/stream         stream synthesis (chunks per sentence)
   POST /api/v1/tts/piper/prepare        start background voice download (~60MB)
   GET  /api/v1/tts/piper/prepare/status poll download progress
 
@@ -14,6 +15,7 @@ import base64
 import traceback
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.services import piper_models, piper_tts
@@ -97,6 +99,73 @@ async def synthesize_speech(req: TTSRequest):
         "duration_seconds": round(duration, 3),
         "audio_base64": base64.b64encode(wav_bytes).decode("ascii"),
     }
+
+
+# ================================================================
+# STREAMING ENDPOINT
+# ================================================================
+
+class StreamRequest(BaseModel):
+    model_config = {"extra": "ignore"}
+    text: str = Field(min_length=1, max_length=5000)
+    target_lang: str = "te-IN"
+
+
+@router.post("/tts/piper/stream")
+async def synthesize_stream(req: StreamRequest):
+    """Stream audio chunks as they're generated (one chunk per sentence).
+    
+    Returns raw PCM16 chunks with a simple framing:
+    - Each chunk: 4-byte little-endian length + PCM16 bytes
+    - Final chunk: length = 0
+    """
+    lang = req.target_lang
+    if lang not in piper_models.PIPER_VOICES:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": f"no Piper voice available for '{lang}'.",
+                "language_checkpoint_not_loaded": lang,
+                "piper_voice_missing": lang,
+                "supported": list(piper_models.PIPER_VOICES.keys()),
+            },
+        )
+    if not piper_models.is_available(lang):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": f"Piper voice for '{lang}' not downloaded yet. Trigger download first.",
+                "language_checkpoint_not_loaded": lang,
+                "checkpoint_missing": lang,
+                "prepare_hint": f"POST /api/v1/tts/piper/prepare {{\"lang\":\"{lang}\"}}",
+            },
+        )
+
+    async def stream_generator():
+        try:
+            async for pcm16, duration, is_final in piper_tts.synthesize_stream(req.text, lang):
+                if is_final:
+                    # Final marker: 4-byte length = 0
+                    yield b"\x00\x00\x00\x00"
+                    break
+                # Frame: 4-byte little-endian length + PCM16 data
+                length = len(pcm16)
+                yield length.to_bytes(4, "little") + pcm16
+        except Exception as e:
+            # Log error but don't break the stream - client will handle timeout
+            import traceback
+            print(f"[AakashVani:tts/piper/stream] error: {e}\n{traceback.format_exc()}", flush=True)
+            raise
+
+    return StreamingResponse(
+        stream_generator(),
+        media_type="application/octet-stream",
+        headers={
+            "X-Audio-Sample-Rate": str(piper_tts._state.get("sample_rate", 22050)),
+            "X-Audio-Channels": "1",
+            "X-Audio-Format": "pcm16",
+        }
+    )
 
 
 @router.post("/tts/piper/prepare")

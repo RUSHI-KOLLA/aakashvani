@@ -115,6 +115,119 @@ async function synthesizeSpeech(text, language, backend = 'piper', apiKey = '') 
   }
 }
 
+// ---- STREAMING TTS (Piper) ----
+// Streams audio chunks as they're generated, plays them immediately via AudioContext.
+// Returns { ok: true } on success, or error object on failure.
+async function synthesizeSpeechStream(text, language, onChunk, onEnd, onError) {
+  const engine = await getEngineUrl();
+  const path = '/api/v1/tts/piper/stream';
+  const body = { text, target_lang: language || 'te-IN' };
+  
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000); // Longer timeout for streaming
+  
+  try {
+    const res = await fetch(`${engine}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(`tts stream ${res.status}: ${err.message || err.detail || 'stream failed'}`);
+    }
+    
+    // Read streaming response: framed as [4-byte LE length][PCM16 bytes]... final chunk = 0 length
+    const reader = res.body.getReader();
+    const sampleRate = parseInt(res.headers.get('X-Audio-Sample-Rate') || '22050', 10);
+    const channels = parseInt(res.headers.get('X-Audio-Channels') || '1', 10);
+    
+    // Create AudioContext for playback
+    const audioCtx = new AudioContext({ sampleRate });
+    let bufferQueue = [];
+    let isPlaying = false;
+    let totalDuration = 0;
+    let chunkCount = 0;
+    
+    async function playNextChunk() {
+      if (bufferQueue.length === 0) {
+        isPlaying = false;
+        return;
+      }
+      isPlaying = true;
+      const pcm16 = bufferQueue.shift();
+      const audioBuffer = audioCtx.createBuffer(channels, pcm16.length / 2 / channels, sampleRate);
+      const data = audioBuffer.getChannelData(0);
+      const int16 = new Int16Array(pcm16.buffer, pcm16.byteOffset, pcm16.length / 2);
+      for (let i = 0; i < int16.length; i++) {
+        data[i] = int16[i] / 32768.0;
+      }
+      const source = audioCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioCtx.destination);
+      source.onended = () => {
+        totalDuration += audioBuffer.duration;
+        if (onChunk) onChunk({ duration: audioBuffer.duration, chunkIndex: chunkCount });
+        chunkCount++;
+        playNextChunk();
+      };
+      source.start(0);
+    }
+    
+    let buffer = new Uint8Array(0);
+    
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      
+      // Append new data to buffer
+      const newBuffer = new Uint8Array(buffer.length + value.length);
+      newBuffer.set(buffer);
+      newBuffer.set(value, buffer.length);
+      buffer = newBuffer;
+      
+      // Parse frames: [4-byte LE length][PCM16 data]...
+      while (buffer.length >= 4) {
+        const length = buffer[0] | (buffer[1] << 8) | (buffer[2] << 16) | (buffer[3] << 24);
+        if (length === 0) {
+          // Final chunk marker
+          if (onEnd) onEnd({ totalDuration, chunkCount });
+          return { ok: true, duration: totalDuration, chunks: chunkCount };
+        }
+        if (buffer.length < 4 + length) {
+          // Need more data
+          break;
+        }
+        // Extract PCM16 chunk
+        const pcm16 = buffer.slice(4, 4 + length);
+        buffer = buffer.slice(4 + length);
+        
+        // Queue for playback
+        bufferQueue.push(pcm16);
+        if (!isPlaying) {
+          playNextChunk();
+        }
+      }
+    }
+    
+    // Wait for any remaining chunks to finish
+    while (bufferQueue.length > 0 || isPlaying) {
+      await new Promise(r => setTimeout(r, 50));
+    }
+    
+    if (onEnd) onEnd({ totalDuration, chunkCount });
+    return { ok: true, duration: totalDuration, chunks: chunkCount };
+    
+  } catch (e) {
+    clearTimeout(timeout);
+    if (onError) onError(e);
+    throw e;
+  }
+}
+
 async function prepareCheckpoint(lang, backend = 'piper') {
   const engine = await getEngineUrl();
   const isPiper = backend === 'piper';
@@ -278,6 +391,43 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           request_id: tts.request_id || null,
           language_code: tts.language_code || null,
         });
+
+      } else if (msg.type === 'TTS_STREAM') {
+        // Streaming TTS for Piper: plays audio chunks as they arrive
+        // Returns when all chunks have been played
+        const settings = await getSettings();
+        const apiKey = msg.apiKey || settings.apiKey || '';
+        
+        try {
+          const result = await synthesizeSpeechStream(
+            msg.text,
+            msg.language,
+            // onChunk callback - could send progress updates if needed
+            (chunkInfo) => {
+              // Could send progress updates: chrome.runtime.sendMessage({ type: 'TTS_STREAM_PROGRESS', ... })
+            },
+            // onEnd callback
+            (endInfo) => {
+              console.log(`[AakashVani] TTS stream completed: ${endInfo.chunkCount} chunks, ${endInfo.totalDuration.toFixed(2)}s`);
+            },
+            // onError callback
+            (error) => {
+              console.warn('[AakashVani] TTS stream error:', error.message);
+            }
+          );
+          
+          sendResponse({
+            ok: true,
+            duration: result.duration,
+            chunks: result.chunks,
+            request_id: `stream-${Date.now()}`,
+            provider: 'piper',
+            mode: 'stream'
+          });
+        } catch (e) {
+          console.error('[AakashVani] TTS_STREAM failed:', e);
+          sendResponse({ ok: false, error: { message: e.message || 'TTS stream failed' } });
+        }
 
       } else if (msg.type === 'ASR_ENABLE') {
         // Requires a user-gesture invocation (popup click) — activeTab gets

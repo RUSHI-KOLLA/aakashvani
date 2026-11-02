@@ -194,3 +194,61 @@ def _synthesize_once(text, target_lang):
         print(f"[AakashVani:piper_tts] synthesis failed [{target_lang}] text={repr(text[:120])}\n{tb}", flush=True)
         logger.error("Piper TTS synthesis failed [%s]: %s\n%s", target_lang, e, tb)
         raise
+
+
+# ================================================================
+# STREAMING SYNTHESIS (yields audio chunks as generated)
+# ================================================================
+
+async def synthesize_stream(text: str, target_lang: str):
+    """Stream synthesis: yields (pcm16_bytes, duration_seconds, is_final) for each chunk.
+    
+    Yields one chunk per sentence. Each chunk is raw PCM16 bytes at the voice's sample rate.
+    """
+    if target_lang not in piper_models.PIPER_VOICES:
+        raise ValueError(f"Unsupported target language '{target_lang}' for Piper TTS.")
+    if not piper_models.is_available(target_lang):
+        raise RuntimeError(f"__PIPER_MODEL_MISSING__{target_lang}")
+
+    loop = asyncio.get_running_loop()
+    async for chunk in _synthesize_stream_generator(text, target_lang):
+        yield chunk
+
+
+async def _synthesize_stream_generator(text: str, target_lang: str):
+    """Generator that yields (pcm16_bytes, duration_seconds, is_final) for each sentence."""
+    import numpy as np
+    import soundfile as sf
+    import io
+
+    try:
+        with _load_lock:
+            _ensure_loaded_locked(target_lang)
+            voice = _state["voice"]
+            sr = int(_state["sample_rate"])
+
+        if voice is None:
+            raise RuntimeError("Piper TTS not loaded — checkpoint missing or load failed.")
+
+        # Piper's synthesize() is already a generator yielding one AudioChunk per sentence
+        for chunk in voice.synthesize(text):
+            audio_float = chunk.audio_float_array  # float32 [-1, 1]
+            if audio_float.size == 0:
+                continue
+
+            # Convert float32 [-1,1] to int16 PCM
+            audio_int16 = (audio_float * 32767).astype(np.int16)
+            pcm16 = audio_int16.tobytes()
+            duration = float(len(audio_float)) / sr
+
+            yield pcm16, duration, False  # Not final (more chunks may follow)
+
+        # Signal completion
+        yield b"", 0.0, True
+
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[AakashVani:piper_tts] stream synthesis failed [{target_lang}] text={repr(text[:120])}\n{tb}", flush=True)
+        logger.error("Piper TTS stream synthesis failed [%s]: %s", target_lang, e)
+        raise
