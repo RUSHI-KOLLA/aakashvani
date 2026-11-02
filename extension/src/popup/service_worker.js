@@ -456,10 +456,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
               const pcm16 = buffer.slice(4, 4 + length);
               buffer = buffer.slice(4 + length);
               
+              // Calculate chunk duration and accumulate
+              const chunkDuration = pcm16.length / 2 / channels / sampleRate; // seconds
+              totalDuration += chunkDuration;
+              
               // Send chunk to content script for playback
               chrome.tabs.sendMessage(tab.id, {
                 type: 'TTS_STREAM_CHUNK',
-                pcm16: Array.from(pcm16), // Convert to array for messaging
+                pcm16: Array.from(pcm16),
                 sampleRate,
                 channels,
                 chunkIndex: chunkCount
