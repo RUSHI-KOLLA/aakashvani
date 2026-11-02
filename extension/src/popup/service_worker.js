@@ -393,37 +393,80 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         });
 
       } else if (msg.type === 'TTS_STREAM') {
-        // Streaming TTS for Piper: plays audio chunks as they arrive
-        // Returns when all chunks have been played
-        const settings = await getSettings();
-        const apiKey = msg.apiKey || settings.apiKey || '';
+        // Streaming TTS for Piper: forward stream to content script for playback
+        // (service workers cannot play audio directly)
+        const tab = await getActiveTab();
+        if (!tab) {
+          sendResponse({ ok: false, error: { message: 'No active tab for audio playback' } });
+          return;
+        }
+        
+        const engine = await getEngineUrl();
+        const path = '/api/v1/tts/piper/stream';
+        const body = { text: msg.text, target_lang: msg.language || 'te-IN' };
         
         try {
-          const result = await synthesizeSpeechStream(
-            msg.text,
-            msg.language,
-            // onChunk callback - could send progress updates if needed
-            (chunkInfo) => {
-              // Could send progress updates: chrome.runtime.sendMessage({ type: 'TTS_STREAM_PROGRESS', ... })
-            },
-            // onEnd callback
-            (endInfo) => {
-              console.log(`[AakashVani] TTS stream completed: ${endInfo.chunkCount} chunks, ${endInfo.totalDuration.toFixed(2)}s`);
-            },
-            // onError callback
-            (error) => {
-              console.warn('[AakashVani] TTS stream error:', error.message);
-            }
-          );
-          
-          sendResponse({
-            ok: true,
-            duration: result.duration,
-            chunks: result.chunks,
-            request_id: `stream-${Date.now()}`,
-            provider: 'piper',
-            mode: 'stream'
+          const res = await fetch(`${engine}${path}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
           });
+          
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(`tts stream ${res.status}: ${err.message || err.detail || 'stream failed'}`);
+          }
+          
+          // Forward stream to content script for playback
+          const reader = res.body.getReader();
+          const sampleRate = parseInt(res.headers.get('X-Audio-Sample-Rate') || '22050', 10);
+          const channels = parseInt(res.headers.get('X-Audio-Channels') || '1', 10);
+          
+          let chunkCount = 0;
+          let totalDuration = 0;
+          let buffer = new Uint8Array(0);
+          
+          // Stream chunks to content script
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            
+            // Append new data to buffer
+            const newBuffer = new Uint8Array(buffer.length + value.length);
+            newBuffer.set(buffer);
+            newBuffer.set(value, buffer.length);
+            buffer = newBuffer;
+            
+            // Parse frames: [4-byte LE length][PCM16 data]...
+            while (buffer.length >= 4) {
+              const length = buffer[0] | (buffer[1] << 8) | (buffer[2] << 16) | (buffer[3] << 24);
+              if (length === 0) {
+                // Final chunk marker
+                chrome.tabs.sendMessage(tab.id, { type: 'TTS_STREAM_END', totalDuration, chunkCount });
+                break;
+              }
+              if (buffer.length < 4 + length) {
+                break;
+              }
+              const pcm16 = buffer.slice(4, 4 + length);
+              buffer = buffer.slice(4 + length);
+              
+              // Send chunk to content script for playback
+              chrome.tabs.sendMessage(tab.id, {
+                type: 'TTS_STREAM_CHUNK',
+                pcm16: Array.from(pcm16), // Convert to array for messaging
+                sampleRate,
+                channels,
+                chunkIndex: chunkCount
+              });
+              chunkCount++;
+            }
+          }
+          
+          // Wait a bit for last chunk to be sent
+          await new Promise(r => setTimeout(r, 100));
+          
+          sendResponse({ ok: true, duration: totalDuration, chunks: chunkCount });
         } catch (e) {
           console.error('[AakashVani] TTS_STREAM failed:', e);
           sendResponse({ ok: false, error: { message: e.message || 'TTS stream failed' } });

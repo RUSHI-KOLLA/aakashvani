@@ -910,6 +910,13 @@ class SyncController {
       if (msg.type === 'ASR_ERROR') {
         this._handleAsrError(msg);
       }
+      // Streaming TTS playback (chunks arrive from service worker)
+      if (msg.type === 'TTS_STREAM_CHUNK') {
+        this._playStreamingTtsChunk(msg);
+      }
+      if (msg.type === 'TTS_STREAM_END') {
+        this._finalizeStreamingTts(msg);
+      }
     });
   }
 
@@ -1483,6 +1490,71 @@ class SyncController {
     audio.preservesPitch = true;
     audio._blobUrl = url;
     return { audio, url };
+  }
+
+  // ---- Streaming TTS playback (chunks arrive from service worker) ----
+  _playStreamingTtsChunk(msg) {
+    // Initialize streaming audio context on first chunk
+    if (!this._streamingAudioCtx) {
+      this._streamingAudioCtx = new AudioContext({ sampleRate: msg.sampleRate });
+      this._streamingChunkQueue = [];
+      this._streamingIsPlaying = false;
+      this._streamingChunkCount = 0;
+      this._streamingTotalDuration = 0;
+      console.log('[AakashVani] Streaming TTS: initialized AudioContext at', msg.sampleRate, 'Hz');
+    }
+
+    // Convert array back to Uint8Array
+    const pcm16 = new Uint8Array(msg.pcm16);
+    const duration = pcm16.length / 2 / msg.channels / msg.sampleRate; // seconds
+    
+    // Queue chunk for sequential playback
+    this._streamingChunkQueue.push({ pcm16, duration, sampleRate: msg.sampleRate, channels: msg.channels });
+    
+    if (!this._streamingIsPlaying) {
+      this._playNextStreamingChunk();
+    }
+  }
+
+  _playNextStreamingChunk() {
+    if (this._streamingChunkQueue.length === 0) {
+      this._streamingIsPlaying = false;
+      return;
+    }
+    this._streamingIsPlaying = true;
+    
+    const { pcm16, duration, sampleRate, channels } = this._streamingChunkQueue.shift();
+    
+    // Create AudioBuffer from PCM16
+    const audioBuffer = this._streamingAudioCtx.createBuffer(channels, pcm16.length / 2 / channels, sampleRate);
+    const data = audioBuffer.getChannelData(0);
+    const int16 = new Int16Array(pcm16.buffer, pcm16.byteOffset, pcm16.length / 2);
+    for (let i = 0; i < int16.length; i++) {
+      data[i] = int16[i] / 32768.0;
+    }
+    
+    const source = this._streamingAudioCtx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(this._streamingAudioCtx.destination);
+    source.onended = () => {
+      this._streamingTotalDuration += audioBuffer.duration;
+      this._streamingChunkCount++;
+      this._playNextStreamingChunk();
+    };
+    source.start(0);
+  }
+
+  _finalizeStreamingTts(msg) {
+    console.log('[AakashVani] Streaming TTS completed:', msg.chunkCount, 'chunks,', msg.totalDuration.toFixed(2), 's');
+    // Clean up
+    if (this._streamingAudioCtx) {
+      this._streamingAudioCtx.close().catch(() => {});
+      this._streamingAudioCtx = null;
+    }
+    this._streamingChunkQueue = [];
+    this._streamingIsPlaying = false;
+    this._streamingChunkCount = 0;
+    this._streamingTotalDuration = 0;
   }
 
   // ---- P1-5: Invalidate stale TTS for a caption ID (correction arrived) ----
