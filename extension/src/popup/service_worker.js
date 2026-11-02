@@ -33,6 +33,11 @@ async function getEngineUrl() {
   }
 }
 
+async function getActiveTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab || null;
+}
+
 // ---- Offscreen document lifecycle (race-safe) ----
 let _offscreenCreating = null;
 async function ensureOffscreenDocument(reasons = ['DOM_PARSER']) {
