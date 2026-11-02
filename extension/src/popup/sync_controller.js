@@ -16,7 +16,7 @@ class TimelineScheduler {
     this.video = null;
     this._monitorTimer = null;
     this._tickTimer = null;
-    this.duckLevel = 10;
+    this.duckLevel = 1;
     this._prevVolume = null;
     this._generation = 0;
     // Monotonic sequence number assigned to each segment added to this scheduler.
@@ -271,12 +271,30 @@ class TimelineScheduler {
     let targetStart, targetEnd;
     if (caption.startTime != null) {
       targetStart = caption.startTime;
+      // Use actual audio duration for targetEnd when available (metadata loaded).
+      // Otherwise fall back to caption.duration or 3s default.
+      // We'll update targetEnd when onloadedmetadata fires.
       targetEnd = caption.endTime != null
         ? caption.endTime
-        : targetStart + (caption.duration || 3);
+        : targetStart + (audio.duration || caption.duration || 3);
     } else {
       targetStart = this.video ? this.video.currentTime : 0;
-      targetEnd = targetStart + (caption.duration || 3);
+      targetEnd = targetStart + (audio.duration || caption.duration || 3);
+    }
+    // If audio metadata isn't loaded yet, wait for it and update targetEnd.
+    if (audio.readyState < 1) { // HAVE_METADATA
+      audio.onloadedmetadata = () => {
+        if (caption.endTime == null) {
+          // Update targetEnd with actual audio duration
+          targetEnd = targetStart + audio.duration;
+          // If segment is already in scheduler, update it
+          for (const seg of this.segments) {
+            if (seg.caption.id === caption.id && seg.targetEnd !== targetEnd) {
+              seg.targetEnd = targetEnd;
+            }
+          }
+        }
+      };
     }
     // Stable segment ID for centralized scheduling (Research #4)
     const segmentId = caption.id || `seg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -344,12 +362,13 @@ class TimelineScheduler {
   static AUDIO_LEAD = 0.3;
 
   // Segments arriving more than this many seconds late are skipped (stale audio).
-  static LATE_AUDIO_THRESHOLD = 3.0;
+  // Increased from 5.0 to 8.0 to account for translation + TTS latency (600-2000ms).
+  static LATE_AUDIO_THRESHOLD = 8.0;
 
   // Late segment policy (Research #5): 'drop' | 'play' | 'compress' | 'reschedule'
   // - 'drop': discard late segments (default, current behavior)
   // - 'play': play late segments immediately (may overlap)
-  // - 'compress': play with time-compression (playbackRate > 1)
+  // - 'compress': play with time-compression (playbackRate > 1) — DISABLED: causes 1.5x speed
   // - 'reschedule': shift to play as soon as possible (causes overlapping audio — use with caution)
   static LATE_POLICY = 'drop';
 
@@ -626,7 +645,7 @@ class TimelineScheduler {
 
 class SyncController {
   constructor() {
-    this.settings = { ducking: 10, mode: 'auto', ttsBackend: 'piper', asrFallback: false };
+    this.settings = { ducking: 1, mode: 'auto', ttsBackend: 'piper', asrFallback: false };
     this.queue = [];
     this.inflight = [];
     this.playing = false;
@@ -692,7 +711,7 @@ class SyncController {
     chrome.storage.local.get(['ducking', 'mode', 'ttsBackend', 'apiKey', 'asrFallback'], (s) => {
       this.settings = { ...this.settings, ...s };
       this.settings.asrFallback = !!this.settings.asrFallback;
-      this.scheduler.duckLevel = this.settings.ducking ?? 10;
+      this.scheduler.duckLevel = this.settings.ducking ?? 1;
     });
 
     // Phase 2: TranscriptController for revision-aware caption pipeline
@@ -1348,7 +1367,7 @@ class SyncController {
         const backend = this.settings.ttsBackend || 'piper';
         const tts = await chrome.runtime.sendMessage({ type: 'TTS_ONLY', text: item.translated, language: this.settings.language || 'te-IN', backend, apiKey: this.settings.apiKey || '' });
         if (tts && tts.ok && item.genAtStart === this._generation) {
-          this.scheduler.addSegment(item.caption, tts.audio);
+          await this.scheduler.addSegment(item.caption, tts.audio);
           this.scheduler.tick();
         }
       } catch (e) {

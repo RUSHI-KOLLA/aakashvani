@@ -25,7 +25,7 @@ const CONFIG = {
   MIN_OBSERVATIONS: 2,            // min consecutive observations of same text
   // Phrase segmentation
   MAX_PHRASE_CHARS: 120,          // max chars per phrase
-  MAX_PHRASE_WAIT_MS: 1500,       // max wait before releasing a phrase
+  MAX_PHRASE_WAIT_MS: 2000,       // max wait before releasing a phrase (>= MAX_STABILITY_MS)
   MIN_PAUSE_CHARS: 40,            // min gap to treat as phrase boundary (chars)
   // Caption health
   STALE_CAPTION_MS: 5000,         // no new caption text → consider stale

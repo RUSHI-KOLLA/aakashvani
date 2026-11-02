@@ -174,7 +174,9 @@
   }
 
   function readCaption() {
-    return readCaptionFromTextTrack() || readCaptionFromDOM();
+    const tt = readCaptionFromTextTrack();
+    if (tt && tt.length) return tt;  // TextTrack wins — NEVER fall back to DOM if TT has cues
+    return readCaptionFromDOM();     // Only use DOM if NO TextTrack cues
   }
 
   // ---- Caption diffing ----
@@ -320,13 +322,11 @@
       : startTime + DEFAULT_CAPTION_DURATION;
 
     // When the revision-aware transcript pipeline is available, send the
-    // PENDING (delta) text so TranscriptController.reconcile() can diff against
-    // its committed prefix and extract only the new residual words. The
-    // transcript controller handles stability, phrase segmentation, and
-    // duplicate prevention internally. Sending the full display text would
-    // cause double-diffing and prevent the committed prefix from growing.
+    // FULL display text so TranscriptController.reconcile() handles ALL diffing.
+    // This avoids double-diffing (content.js diff + TranscriptController diff)
+    // which was causing word loss in sliding-window captions.
     const usePipeline = typeof controller.ingestCaption === 'function';
-    const text = usePipeline ? pendingText : pendingText;
+    const text = usePipeline ? state.displayText : pendingText;
     const relation = state.pendingRelation;
 
     if (!text || !isSpokenCaption(text)) {

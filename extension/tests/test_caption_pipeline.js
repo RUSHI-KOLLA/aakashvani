@@ -149,7 +149,7 @@ function createEnv(options = {}) {
     storage: {
       local: {
         get(_keys, cb) {
-          cb({ mode: 'auto', language: 'te-IN', ttsBackend: 'piper', ducking: 10, ...(options.settings || {}) });
+          cb({ mode: 'auto', language: 'te-IN', ttsBackend: 'piper', ducking: 1, ...(options.settings || {}) });
         },
       },
       onChanged: { addListener() {} },
@@ -165,6 +165,11 @@ function createEnv(options = {}) {
       this.currentTime = 0;
       this.duration = 1;
       this.paused = true;
+      this.readyState = 4; // HAVE_ENOUGH_DATA - metadata loaded
+      // Simulate onloadedmetadata firing synchronously for tests
+      if (this.onloadedmetadata) {
+        setTimeout(() => this.onloadedmetadata(), 0);
+      }
     }
     play() {
       this.paused = false;
@@ -208,6 +213,9 @@ function createEnv(options = {}) {
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
+
+  // Assign chrome mock to sandbox so sync_controller.js can access it
+  sandbox.chrome = chrome;
 
   if (withController) {
     vm.runInContext(SYNC_SRC, sandbox, { filename: 'sync_controller.js' });
