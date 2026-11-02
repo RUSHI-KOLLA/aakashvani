@@ -1363,38 +1363,45 @@ class SyncController {
       // For Sarvam and other backends, fall back to regular TTS
       if (backend === 'piper') {
         // Streaming TTS: plays chunks as they arrive, returns when done
-        const streamResult = await new Promise((resolve, reject) => {
-          chrome.runtime.sendMessage({
-            type: 'TTS_STREAM',
-            text: translated,
-            language: lang,
-            backend,
-            apiKey: settings.apiKey || ''
-          }, (response) => {
-            if (chrome.runtime.lastError) {
-              reject(new Error(chrome.runtime.lastError.message));
-            } else if (response && response.ok) {
-              resolve(response);
-            } else {
-              reject(new Error(response?.error?.message || 'TTS stream failed'));
-            }
+        let streamResult;
+        try {
+          streamResult = await new Promise((resolve, reject) => {
+            chrome.runtime.sendMessage({
+              type: 'TTS_STREAM',
+              text: translated,
+              language: lang,
+              backend,
+              apiKey: settings.apiKey || ''
+            }, (response) => {
+              if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+              } else if (response && response.ok) {
+                resolve(response);
+              } else {
+                reject(new Error(response?.error?.message || 'TTS stream failed'));
+              }
+            });
           });
-        });
-        
-        if (!streamResult || !streamResult.ok) {
-          if (caption.seq !== undefined && this.transcriptController) {
-            this.transcriptController.markFailed(caption.id, streamResult?.error || 'TTS stream failed');
-          }
-          throw new Error(streamResult?.error || 'TTS stream failed');
+        } catch (streamError) {
+          console.warn('[AakashVani] Streaming TTS failed, falling back to regular TTS:', streamError.message);
+          streamResult = null;
         }
         
-        ttsDuration = streamResult.duration;
-        ttsRequestId = streamResult.request_id || `stream-${Date.now()}`;
-        // For streaming, we don't have base64 audio - the audio was played directly
-        // Create a placeholder for cache (streaming doesn't cache the same way)
-        audioBase64 = `stream:${ttsRequestId}`;
-        
-      } else {
+        // Fallback to regular TTS if streaming failed
+        if (!streamResult || !streamResult.ok) {
+          console.warn('[AakashVani] Streaming TTS unavailable, using regular TTS fallback');
+          // Fall through to regular TTS below
+        } else {
+          ttsDuration = streamResult.duration;
+          ttsRequestId = streamResult.request_id || `stream-${Date.now()}`;
+          // For streaming, we don't have base64 audio - the audio was played directly
+          // Create a placeholder for cache (streaming doesn't cache the same way)
+          audioBase64 = `stream:${ttsRequestId}`;
+        }
+      }
+      
+      // Regular TTS (for Sarvam, or Piper fallback)
+      if (!audioBase64) {
         // Regular TTS for Sarvam and other backends
         let tts;
         try {
