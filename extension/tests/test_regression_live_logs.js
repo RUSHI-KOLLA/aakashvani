@@ -166,13 +166,21 @@ section('Regression: Short fragments (a, CE, for, starts) committed as utterance
   const shortFragments = ['a', 'CE', 'for', 'starts', 'evidence.', 'evidence.'];
   const committed = [];
 
+  // Simulate a SINGLE TextTrack cue growing progressively (same startTime, growing text)
+  // This is how YouTube TextTrack cues actually work - the cue startTime stays constant
+  const captionId = 'cap-growing-1';
+  const startTime = 10;
+  const endTime = 13;
+  
   for (let i = 0; i < shortFragments.length; i++) {
     fakeNow = i * 500;
-    const cap = makeCaption(shortFragments[i], 10 + i, 11 + i);
-    const norm = tc.ingestCaption(cap, 'texttrack', 10 + i);
+    // Each observation has same ID and time, but growing text (cumulative)
+    const cumulativeText = shortFragments.slice(0, i+1).join(' ');
+    const cap = makeCaption(cumulativeText, startTime, endTime, 'texttrack', captionId);
+    const norm = tc.ingestCaption(cap, 'texttrack', startTime);
     let segs = tc.reconcile(norm);  // First observation - might commit on phrase boundary
     if (segs) committed.push(...segs.map(s => s.text));
-    fakeNow = i * 500 + 300; // 2nd observation
+    fakeNow = i * 500 + 300; // 2nd observation (stability check)
     segs = tc.reconcile(norm);  // Second observation - might commit on stability
     if (segs) committed.push(...segs.map(s => s.text));
   }
@@ -195,12 +203,12 @@ section('Regression: Stale segment detection timing');
   const fs = require('fs');
   const syncSrc = fs.readFileSync('/home/rushi/aakashvani/extension/src/popup/sync_controller.js', 'utf8');
   
-  // Check LATE_AUDIO_THRESHOLD = 3.0
-  assert(syncSrc.includes('LATE_AUDIO_THRESHOLD = 3.0'), 'LATE_AUDIO_THRESHOLD is 3.0s');
+  // Check LATE_AUDIO_THRESHOLD = 8.0 (increased for translation+TTS latency)
+  assert(syncSrc.includes('LATE_AUDIO_THRESHOLD = 8.0'), 'LATE_AUDIO_THRESHOLD is 8.0s');
   // Check AUDIO_LEAD = 0.3
   assert(syncSrc.includes('AUDIO_LEAD = 0.3'), 'AUDIO_LEAD is 300ms');
   
-  console.log('LATE_AUDIO_THRESHOLD: 3.0s (from source)');
+  console.log('LATE_AUDIO_THRESHOLD: 8.0s (from source)');
   console.log('AUDIO_LEAD: 0.3s (from source)');
 }
 

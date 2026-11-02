@@ -329,36 +329,33 @@ class TranscriptController {
 
     // Detect cue change: if the new caption has a different startTime than the
     // cue that produced the current uncommitted text, treat it as a new cue.
-    // For continuing speech (new cue, later startTime), commit the previous
-    // pending text if stable, then start fresh with the new cue's residual.
+    // For continuing speech (new cue, later startTime), APPEND the new cue's
+    // residual words to the pending text and CONTINUE the stability timer.
+    // This accumulates fragments across cues into larger phrases (Bug 12 fix).
     // For corrections (same cue ID), the relation logic below handles replace.
-    const isNewCue = startTime != null &&
+    // ONLY apply for TextTrack captions — DOM/ASR use video.currentTime which
+    // always advances, so would trigger false cue changes on every update.
+    const isTextTrack = caption.source === 'texttrack';
+    const isNewCue = isTextTrack &&
+      startTime != null &&
       this.uncommittedCueStart != null &&
       startTime >= this.uncommittedCueStart + 0.5; // >=500ms gap = new cue
     let didCueChangeAppend = false;
     if (isNewCue) {
-      // New cue arrived: commit the previous pending text if stable.
-      // Then start fresh with the new cue's residual words.
-      if (this.uncommitted) {
-        const stableMs = Date.now() - this.uncommittedFirstSeen;
-        const obsCount = this.uncommittedObservations;
-        const isStable = stableMs >= this.config.MIN_STABILITY_MS && obsCount >= this.config.MIN_OBSERVATIONS;
-        
-        if (isStable) {
-          const committedSegments = this._commitPending(caption, 'cue-change');
-          if (committedSegments) segments.push(...committedSegments);
-        }
-        // If not stable, discard the unstable pending (point 5 in invariants).
-        // The new cue's residual will become the new pending.
+      // New cue arrived: append its residual words to the pending text.
+      // This accumulates fragments across sliding-window cues into larger phrases.
+      // The stability timer continues (does NOT reset) so phrases can grow.
+      if (this.uncommitted && residualText) {
+        this.uncommitted = this.uncommitted + ' ' + residualText;
+      } else if (residualText) {
+        this.uncommitted = residualText;
+        this.uncommittedFirstSeen = Date.now();
+        this.uncommittedObservations = 1;
       }
-      
-      // Start fresh with the new cue's residual words (beyond committed prefix).
-      // The committed prefix has been updated (if committed), so residualWords is correct.
-      this.uncommitted = residualText;
-      this.uncommittedFirstSeen = residualText ? Date.now() : 0;
-      this.uncommittedObservations = residualText ? 1 : 0;
-      this.uncommittedCueStart = startTime;
-      this._log('debug', `cue change: ${this.uncommitted ? 'new pending' : 'no pending'} from residual`);
+      // Continue stability timer - do NOT reset uncommittedFirstSeen or observations
+      // The timer continues from when the pending text first appeared.
+      if (isTextTrack) this.uncommittedCueStart = startTime;
+      this._log('debug', `cue change: appended residual, pending="${this.uncommitted.slice(0,60)}"`);
       didCueChangeAppend = true;
     }
 
@@ -382,7 +379,7 @@ class TranscriptController {
         this.uncommitted = this.uncommitted ? this.uncommitted + ' ' + addedText : addedText;
         if (!currentPendingWords.length) {
           this.uncommittedFirstSeen = Date.now();
-          this.uncommittedCueStart = startTime;
+          if (isTextTrack) this.uncommittedCueStart = startTime;
         }
         this.uncommittedObservations = (this.uncommittedObservations || 0) + 1;
       } else if (residualWords.length && _isPrefixWords(residualWords, currentPendingWords)) {
@@ -392,7 +389,7 @@ class TranscriptController {
         this.uncommitted = residualText;
         this.uncommittedFirstSeen = Date.now();
         this.uncommittedObservations = 1;
-        this.uncommittedCueStart = startTime;
+        if (isTextTrack) this.uncommittedCueStart = startTime;
       } else if (residualWords.length && _isSuffixWords(residualWords, currentPendingWords)) {
         // Repeated observation of the tail end of accumulated uncommitted text.
         // This happens when a cue's 2nd+ observation only contains the tail fragment
@@ -406,7 +403,7 @@ class TranscriptController {
         this.uncommitted = residualText;
         this.uncommittedFirstSeen = residualText ? Date.now() : 0;
         this.uncommittedObservations = residualText ? 1 : 0;
-        this.uncommittedCueStart = residualText ? startTime : null;
+        this.uncommittedCueStart = isTextTrack && residualText ? startTime : null;
       }
     } else {
       // Cue change append already updated uncommitted; count as growth observation
