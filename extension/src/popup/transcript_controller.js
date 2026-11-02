@@ -339,22 +339,22 @@ class TranscriptController {
     if (isNewCue && this.uncommitted) {
       // Continuing speech: append only the NEW words from the new caption
       // that aren't already in the uncommitted text.
-      // The uncommitted text contains the previous cue's content, so we need
-      // to find the overlap between uncommitted tail and new caption head.
+      // Use residualWords (words beyond committed prefix) for overlap detection,
+      // not the full newWords, to avoid re-adding already-committed words.
       const pendingWords = _tokens(this.uncommitted);
       let overlapLen = 0;
-      const maxOverlap = Math.min(pendingWords.length, newWords.length);
+      const maxOverlap = Math.min(pendingWords.length, residualWords.length);
       for (let k = maxOverlap; k >= 1; k--) {
-        // Check if last k words of uncommitted match first k words of new caption
+        // Check if last k words of uncommitted match first k words of residual
         let match = true;
         for (let i = 0; i < k; i++) {
-          if (_normWord(pendingWords[pendingWords.length - k + i]) !== _normWord(newWords[i])) {
+          if (_normWord(pendingWords[pendingWords.length - k + i]) !== _normWord(residualWords[i])) {
             match = false; break;
           }
         }
         if (match) { overlapLen = k; break; }
       }
-      const newWordsOnly = newWords.slice(overlapLen);
+      const newWordsOnly = residualWords.slice(overlapLen);
       const newTextOnly = newWordsOnly.join(' ');
       if (newTextOnly) {
         this.uncommitted = this.uncommitted ? this.uncommitted + ' ' + newTextOnly : newTextOnly;

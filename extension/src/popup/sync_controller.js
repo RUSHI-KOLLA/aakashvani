@@ -350,8 +350,8 @@ class TimelineScheduler {
   // - 'drop': discard late segments (default, current behavior)
   // - 'play': play late segments immediately (may overlap)
   // - 'compress': play with time-compression (playbackRate > 1)
-  // - 'reschedule': shift to play as soon as possible (default — prevents silent word loss)
-  static LATE_POLICY = 'reschedule';
+  // - 'reschedule': shift to play as soon as possible (causes overlapping audio — use with caution)
+  static LATE_POLICY = 'drop';
 
   // Maximum additional delay (seconds) a rescheduled late segment may introduce
   // before it is considered obsolete and dropped. Prevents unbounded catch-up.

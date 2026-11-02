@@ -44,13 +44,38 @@
     );
   }
 
+  // YouTube UI strings that should never be spoken (expanded from transcript_controller)
+  const YOUTUBE_UI_STRINGS = /^(?:subtitles?|captions?|cc|auto-generated|english \(auto-generated\)|click for settings|settings|audio|quality|speed|theater|full screen|exit full screen|show transcript|hide transcript|autoplay|shuffle|like|dislike|share|save|download|about|press|question mark to access)$/i;
+  // Also detect UI strings embedded in longer text - check for substrings
+  const YOUTUBE_UI_SUBSTRINGS = [
+    'subtitles', 'caption', 'cc', 'auto-generated', 'english (auto-generated)',
+    'click for settings', 'settings', 'audio', 'quality', 'speed', 'theater',
+    'full screen', 'exit full screen', 'show transcript', 'hide transcript',
+    'autoplay', 'shuffle', 'like', 'dislike', 'share', 'save', 'download',
+    'about', 'press', 'question mark to access'
+  ];
+
+  function isYouTubeUI(text) {
+    const t = (text || '').trim();
+    if (!t) return true;
+    if (YOUTUBE_UI_STRINGS.test(t)) return true;
+    // Check for UI substrings embedded in longer text (case-insensitive)
+    const lower = t.toLowerCase();
+    for (const ui of YOUTUBE_UI_SUBSTRINGS) {
+      if (lower.includes(ui.toLowerCase())) return true;
+    }
+    // Must contain at least one letter or digit
+    if (!/[\p{L}\p{N}]/u.test(t)) return true;
+    return false;
+  }
+
   function isSpokenCaption(text) {
     const t = cleanCaptionText(text);
     if (!t) return false;
     // Must contain at least one letter or digit (ignore "...", "—", etc.).
     if (!/[\p{L}\p{N}]/u.test(t)) return false;
     // Caption-player interface strings are not spoken content.
-    if (/^(?:subtitles?|captions?|cc|auto-generated|english \(auto-generated\))$/i.test(t)) return false;
+    if (isYouTubeUI(t)) return false;
     return true;
   }
 
@@ -294,17 +319,15 @@
       ? state.pendingEnd
       : startTime + DEFAULT_CAPTION_DURATION;
 
-    // When the revision-aware transcript pipeline is available, send the FULL
-    // display text so TranscriptController.reconcile() can diff against its
-    // committed prefix and extract only the new residual words. Sending delta
-    // fragments would overwrite accumulated uncommitted text and drop confirmed
-    // words (the missing-word bug). Otherwise (enqueue fallback) send the delta
-    // fragment as a self-contained segment.
+    // When the revision-aware transcript pipeline is available, send the
+    // PENDING (delta) text so TranscriptController.reconcile() can diff against
+    // its committed prefix and extract only the new residual words. The
+    // transcript controller handles stability, phrase segmentation, and
+    // duplicate prevention internally. Sending the full display text would
+    // cause double-diffing and prevent the committed prefix from growing.
     const usePipeline = typeof controller.ingestCaption === 'function';
-    const text = usePipeline ? fullText : pendingText;
-    const relation = usePipeline
-      ? diffDisplay(state.lastSpokenDisplay || '', fullText).relation
-      : state.pendingRelation;
+    const text = usePipeline ? pendingText : pendingText;
+    const relation = state.pendingRelation;
 
     if (!text || !isSpokenCaption(text)) {
       state.pendingText = '';

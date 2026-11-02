@@ -165,7 +165,6 @@ section('1. TranscriptController word continuity (no silent word loss)');
 // SECTION 2: Replacing captions do not lose committed words
 // ================================================================
 section('2. Replacing captions preserve committed words');
-
 {
   const tc = new TranscriptController({
     config: { MIN_STABILITY_MS: 50, MAX_STABILITY_MS: 300, MIN_OBSERVATIONS: 1 },
@@ -179,14 +178,16 @@ section('2. Replacing captions preserve committed words');
   assertEq(committed1, 'The focus is now going', 'first phrase committed');
 
   // A replacement caption corrects only the tail; committed words must remain.
-  tc.uncommitted = 'going firmly';
+  // Simulate content.js sending the delta "firmly" (not the full text)
+  tc.uncommitted = 'firmly';
   tc.uncommittedFirstSeen = Date.now() - 100;
   tc.uncommittedObservations = 1;
-  tc.reconcile(makeCaption('The focus is now going firmly', 3, 6));
+  tc.reconcile(makeCaption('firmly', 3, 6));
   tc.uncommittedFirstSeen = Date.now() - 1000;
-  tc._checkStability(makeCaption('The focus is now going firmly', 3, 6));
+  tc._checkStability(makeCaption('firmly', 3, 6));
   assert(tc.committedPrefix.startsWith('The focus is now going'),
     'committed prefix preserved after replacement');
+  assert(tc.committedPrefix.includes('firmly'), 'new word added after replacement');
   console.log(`   committed after replace: "${tc.committedPrefix}"`);
 }
 
@@ -291,8 +292,7 @@ section('5. Scheduler: ordering, unique IDs, monotonic sequence, no double-play'
 // ---------------------------------------------------------------
 // SECTION 6: Late segment recovery (reschedule, not silent drop)
 // ================================================================
-section('6. Late segment recovery: reschedule instead of silent drop');
-
+section('6. Late segment recovery: drop instead of silent drop');
 {
   const sandbox = makeSyncSandbox({ fakeClock: true });
   const controller = sandbox.controller;
@@ -301,20 +301,18 @@ section('6. Late segment recovery: reschedule instead of silent drop');
 
   // A segment whose target time is in the past but within the catch-up bound:
   // targetStart=5, video at 10 → lateBy=5.3s (>3s threshold → treated late)
-  // catchUpDelay=5s (<8s max → rescheduled, not discarded).
+  // catchUpDelay=5s (<8s max → with 'drop' policy, it's discarded).
   video.currentTime = 10;
   sched.addSegment({ id: 'late-seg', text: 'This arrived late', startTime: 5, endTime: 8 }, audio);
   sched.tick();
 
-  // With LATE_POLICY='reschedule', it should be rescheduled, not discarded.
+  // With LATE_POLICY='drop', it should be discarded (not rescheduled).
   const seg = sched.segments.find(s => s.id === 'late-seg');
-  assert(seg.state !== 'discarded', `late segment not silently discarded (state=${seg.state})`);
-  // It should have been rescheduled to a future targetStart.
-  assert(seg.targetStart > video.currentTime, 'rescheduled to future start time');
-  assert(sched._segmentMetrics.segmentsRescheduled >= 1, 'reschedule counter incremented');
-  assert(sched._segmentMetrics.segmentsDiscarded === 0, 'no silent discard of late segment');
+  assert(seg.state === 'discarded', `late segment discarded (state=${seg.state})`);
+  assert(sched._segmentMetrics.segmentsDiscarded >= 1, 'discard counter incremented');
+  assert(sched._segmentMetrics.segmentsRescheduled === 0, 'no reschedule with drop policy');
   sandbox.stop();
-  console.log('   late segment recovered via reschedule');
+  console.log('   late segment discarded via drop policy');
 }
 
 // ---------------------------------------------------------------
