@@ -1392,11 +1392,18 @@ class SyncController {
           console.warn('[AakashVani] Streaming TTS unavailable, using regular TTS fallback');
           // Fall through to regular TTS below
         } else {
-          ttsDuration = streamResult.duration;
-          ttsRequestId = streamResult.request_id || `stream-${Date.now()}`;
-          // For streaming, we don't have base64 audio - the audio was played directly
-          // Create a placeholder for cache (streaming doesn't cache the same way)
-          audioBase64 = `stream:${ttsRequestId}`;
+          // Validate that streaming actually produced audio (duration > 0, chunks > 0)
+          const hasAudio = streamResult.duration > 0 && streamResult.chunks > 0;
+          if (!hasAudio) {
+            console.warn('[AakashVani] Streaming TTS produced empty audio (duration:', streamResult.duration, 'chunks:', streamResult.chunks, '), falling back to regular TTS');
+            // Fall through to regular TTS below
+          } else {
+            ttsDuration = streamResult.duration;
+            ttsRequestId = streamResult.request_id || `stream-${Date.now()}`;
+            // For streaming, we don't have base64 audio - the audio was played directly
+            // Create a placeholder for cache (streaming doesn't cache the same way)
+            audioBase64 = `stream:${ttsRequestId}`;
+          }
         }
       }
       
