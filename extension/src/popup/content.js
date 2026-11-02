@@ -642,5 +642,15 @@
 
   bindVideo();
   observeCaptions();
+
+  // Cleanup on page unload/refresh to clear timers and prevent leaks
+  window.addEventListener('pagehide', () => {
+    resetCaptionState(false);
+    console.log('[AakashVani] pagehide — caption state reset');
+  });
+  window.addEventListener('beforeunload', () => {
+    resetCaptionState(false);
+  });
+
   console.log('[AakashVani] caption observer active (stable timers, delta dispatch, DOM fallback)');
 })();

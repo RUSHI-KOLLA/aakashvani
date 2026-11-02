@@ -23,6 +23,7 @@ class TimelineScheduler {
     this._segmentSeq = 0;
     // Structured per-segment lifecycle log (for observability / regression).
     this.segmentLog = [];
+    this._maxSegmentLog = 500;  // Reduced from 2000: each entry has full caption text
     // Per-segment metrics counters.
     this._segmentMetrics = {
       segmentsAdded: 0,
@@ -61,8 +62,8 @@ class TimelineScheduler {
       ...extra,
     });
     // Keep the log bounded.
-    if (this.segmentLog.length > 2000) {
-      this.segmentLog = this.segmentLog.slice(-1000);
+    if (this.segmentLog.length > this._maxSegmentLog) {
+      this.segmentLog = this.segmentLog.slice(-Math.floor(this._maxSegmentLog / 2));
     }
   }
 
@@ -98,7 +99,9 @@ class TimelineScheduler {
   invalidateStaleGenerations(currentGeneration) {
     let invalidated = 0;
     for (const seg of this.segments) {
-      if (seg.generation < currentGeneration && (seg.state === 'ready' || seg.state === 'playing')) {
+      // Discard ALL non-completed segments from old generations
+      // (translating, synthesizing, queued, ready, playing)
+      if (seg.generation < currentGeneration && seg.state !== 'completed' && seg.state !== 'discarded') {
         seg.state = 'discarded';
         this._cleanupSegment(seg);
         this._segmentMetrics.segmentsDiscarded++;
@@ -659,6 +662,9 @@ class SyncController {
     this._checkpointBuffer = [];
     this._checkpointBufferMax = 10;
 
+    // Periodic memory cleanup (every 30s) to prevent accumulation over long sessions
+    this._cleanupTimer = setInterval(() => this._periodicCleanup(), 30000);
+
     // Prefetch effectiveness tracking (Research #2)
     this._prefetchStats = {
       segmentsPrepared: 0,
@@ -706,7 +712,7 @@ class SyncController {
     // C3: LRU cache for translation + TTS
     this._translationCache = new Map();
     this._ttsCache = new Map();
-    this._cacheMax = 50;
+    this._cacheMax = 20;  // Reduced from 50: base64 audio ~100KB each, 20 = ~2MB vs 5MB
 
     chrome.storage.local.get(['ducking', 'mode', 'ttsBackend', 'apiKey', 'asrFallback'], (s) => {
       this.settings = { ...this.settings, ...s };
@@ -1470,6 +1476,7 @@ class SyncController {
     this._checkpointBuffer = [];
     this._translationCache.clear();
     this._ttsCache.clear();
+    if (this._cleanupTimer) { clearInterval(this._cleanupTimer); this._cleanupTimer = null; }
     this.playing = false;
     this.duck(false);
     this._resourceStats.cancellations++;
@@ -1478,6 +1485,28 @@ class SyncController {
     if (this.transcriptController) {
       this.transcriptController.reset();
     }
+  }
+
+  // Periodic cleanup to prevent memory buildup over long sessions
+  _periodicCleanup() {
+    const now = Date.now();
+    // Trim segment log if it grows beyond half the max
+    if (this.scheduler.segmentLog.length > this.scheduler._maxSegmentLog / 2) {
+      this.scheduler.segmentLog = this.scheduler.segmentLog.slice(-Math.floor(this.scheduler._maxSegmentLog / 2));
+    }
+    // Evict old signature entries in TranscriptController (older than 5 min)
+    if (this.transcriptController && this.transcriptController._recentSig) {
+      for (const [sig, ts] of this.transcriptController._recentSig) {
+        if (now - ts > 300000) { // 5 minutes
+          this.transcriptController._recentSig.delete(sig);
+        }
+      }
+    }
+    // Clear old resource stats samples (keep last 1000)
+    if (this.scheduler.segmentLog.length > 1000) {
+      this.scheduler.segmentLog = this.scheduler.segmentLog.slice(-1000);
+    }
+    console.log('[AakashVani] periodic cleanup done');
   }
 }
 
