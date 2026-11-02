@@ -35,12 +35,26 @@ check(ttsPath(undefined) === '/api/v1/tts/piper', "undefined backend -> /api/v1/
 
 console.log("--- sync_controller passes backend in TTS_ONLY (source check) ---");
 const fs = require('fs');
-const sc = fs.readFileSync('src/popup/sync_controller.js', 'utf8');
-check(sc.includes("backend: this.settings.ttsBackend || 'piper'"), "sync_controller sends backend = ttsBackend || 'piper'");
+const path = require('path');
+const SRC = path.join(__dirname, '..', 'src', 'popup');
+const sc = fs.readFileSync(path.join(SRC, 'sync_controller.js'), 'utf8');
+// Backend is extracted into a local const, defaults to 'piper', included in TTS cache key.
+check(sc.includes("const backend = this.settings.ttsBackend || 'piper'"), "sync_controller computes backend = ttsBackend || 'piper'");
 check(sc.includes("this.settings.ttsBackend || 'piper'"), "sync_controller defaults backend to 'piper'");
-const sw = fs.readFileSync('src/popup/service_worker.js', 'utf8');
-check(sw.includes("synthesizeSpeech(msg.text, msg.language, msg.backend)"), "service worker forwards msg.backend to synthesizeSpeech");
-check(sw.includes("async function synthesizeSpeech(text, language, backend = 'piper')"), "service worker synthesizeSpeech defaults backend='piper'");
+check(sc.includes("`${translated}|${lang}|${backend}`"), "sync_controller TTS cache key includes backend/provider");
+check(sc.includes("apiKey: settings.apiKey || ''"), "sync_controller forwards apiKey in TTS_ONLY message");
+const sw = fs.readFileSync(path.join(SRC, 'service_worker.js'), 'utf8');
+check(sw.includes("const apiKey = msg.apiKey || settings.apiKey || ''"), "service worker derives apiKey from message or storage");
+check(sw.includes("synthesizeSpeech(msg.text, msg.language, msg.backend, apiKey)"), "service worker passes resolved apiKey to synthesizeSpeech");
+check(sw.includes("async function synthesizeSpeech(text, language, backend = 'piper', apiKey = '')"), "service worker synthesizeSpeech defaults backend='piper', apiKey=''");
+check(sw.includes("body.sarvam_api_key = apiKey"), "service worker forwards sarvam_api_key in request body for Sarvam backend");
+check(sw.includes("provider: tts.provider"), "service worker forwards provider metadata in TTS response");
+
+console.log("--- Sarvam routing (backend='sarvam') ---");
+check(ttsPath('sarvam') === '/api/v1/tts', "sarvam TTS -> /api/v1/tts");
+check(preparePath('sarvam') === '/api/v1/tts/prepare', "sarvam prepare -> /api/v1/tts/prepare");
+check(prepareStatusPath('sarvam', 'te-IN') === '/api/v1/tts/prepare/status?lang=te-IN', "sarvam status -> /api/v1/tts/prepare/status?lang=te-IN");
+check(ttsPath('sarvam') !== ttsPath('piper'), "sarvam and piper use different endpoints");
 
 console.log(`--- B3 result: ${pass} pass, ${fail} fail ---`);
 process.exit(fail ? 1 : 0);

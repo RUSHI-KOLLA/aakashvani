@@ -13,6 +13,8 @@ const els = {
   ttsEngine: $('tts-engine'),
   apiKey: $('api-key'),
   cloudFallback: $('cloud-fallback'),
+  asrFallback: $('asr-fallback'),
+  asrStatusHint: $('asr-status-hint'),
   ducking: $('ducking'),
   volVal: $('vol-val'),
   engineUrl: $('engine-url'),
@@ -24,6 +26,7 @@ const DEFAULTS = {
   ttsBackend: 'piper',
   apiKey: '',
   cloudFallback: false,
+  asrFallback: false,
   ducking: 10,
   engineUrl: 'http://127.0.0.1:8000',
 };
@@ -53,6 +56,14 @@ async function checkServer() {
     const res = await fetch(`${engine}/api/v1/health`, { signal: AbortSignal.timeout(3000) });
     if (res.ok) {
       setStatus('ok', 'Engine running');
+      try {
+        const data = await res.json();
+        if (data.asr_available) {
+          els.asrStatusHint.textContent = `ASR available (model ${data.asr_model || 'base'}${data.asr_initialized ? ', loaded' : ''})`;
+        } else {
+          els.asrStatusHint.textContent = 'ASR dependency not installed — run ./venv/bin/pip install -r requirements-asr.txt';
+        }
+      } catch (_) {}
       return true;
     }
   } catch (_) { /* fallthrough */ }
@@ -100,16 +111,29 @@ async function loadSettings() {
   els.ttsEngine.value = settings.ttsBackend;
   els.apiKey.value = settings.apiKey;
   els.cloudFallback.checked = settings.cloudFallback;
+  els.asrFallback.checked = settings.asrFallback;
   els.ducking.value = settings.ducking;
   els.volVal.textContent = `${settings.ducking}%`;
   els.engineUrl.value = settings.engineUrl;
   if (saved.authError) showWarning(saved.authError);
+  checkTtsConfig();
 }
 
 function saveSetting(key, value) {
   chrome.storage.local.set({ [key]: value });
   // clear circuit-breaker on key/mode change
   if (key === 'apiKey' || key === 'mode') chrome.storage.local.remove('authError');
+  if (key === 'ttsBackend' || key === 'apiKey') checkTtsConfig();
+}
+
+function checkTtsConfig() {
+  const engine = els.ttsEngine.value;
+  const apiKey = els.apiKey.value.trim();
+  if (engine === 'sarvam' && !apiKey) {
+    showWarning('Sarvam TTS requires an API key — paste it in the API Key field above.');
+  } else {
+    showWarning('');
+  }
 }
 
 function bindEvents() {
@@ -118,6 +142,24 @@ function bindEvents() {
   els.ttsEngine.addEventListener('change', () => saveSetting('ttsBackend', els.ttsEngine.value));
   els.apiKey.addEventListener('change', () => saveSetting('apiKey', els.apiKey.value));
   els.cloudFallback.addEventListener('change', () => saveSetting('cloudFallback', els.cloudFallback.checked));
+  els.asrFallback.addEventListener('change', async () => {
+    const enabled = els.asrFallback.checked;
+    saveSetting('asrFallback', enabled);
+    // Popup interactions are user gestures — the required context for
+    // chrome.tabCapture. Start capture immediately when enabling; stop when disabling.
+    const resp = await chrome.runtime.sendMessage(
+      enabled ? { type: 'ASR_ENABLE' } : { type: 'ASR_DISABLE' },
+    );
+    if (!resp || !resp.ok) {
+      const err = resp && resp.error ? resp.error : { code: 'asr_unknown', message: 'ASR failed' };
+      showWarning(`ASR fallback error (${err.code}): ${err.message}`);
+    } else if (enabled) {
+      showWarning('');
+      els.asrStatusHint.textContent = 'ASR active — capture indicator visible in the tab';
+    } else {
+      els.asrStatusHint.textContent = 'Requires: ./venv/bin/pip install -r requirements-asr.txt';
+    }
+  });
   els.ducking.addEventListener('input', () => {
     els.volVal.textContent = `${els.ducking.value}%`;
     saveSetting('ducking', Number(els.ducking.value));
@@ -146,6 +188,14 @@ function bindEvents() {
     }
     if (msg.type === 'AUTH_ERROR') {
       showWarning(msg.error);
+    }
+    if (msg.type === 'TRANSLATION_ERROR') {
+      const err = msg.error;
+      const msgText = err && err.message ? err.message : String(err || 'Translation failed');
+      showWarning(msgText);
+    }
+    if (msg.type === 'ASR_ERROR') {
+      showWarning(`ASR fallback error (${msg.code})`);
     }
   });
 }

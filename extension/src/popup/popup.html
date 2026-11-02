@@ -87,18 +87,26 @@
 
     <label>TTS Engine</label>
     <select id="tts-engine">
-        <option value="piper">Piper ONNX (active)</option>
+        <option value="piper">Piper ONNX (local)</option>
+        <option value="sarvam">Sarvam AI (cloud, requires API key)</option>
     </select>
 
     <div class="section-title">Sarvam API (Cloud Mode)</div>
     <label>API Key</label>
     <input type="password" id="api-key" placeholder="Paste your Sarvam API key">
-    <p class="hint">Get key at dashboard.sarvam.ai — used for cloud translation</p>
+    <p class="hint">Get key at dashboard.sarvam.ai — used for cloud translation and cloud TTS</p>
 
     <label style="display:flex; align-items:center; gap:8px; text-transform:none; letter-spacing:0; margin-bottom:12px; font-weight:500; color:#e2e8f0">
         <input type="checkbox" id="cloud-fallback" style="width:auto; margin:0">
         Allow paid cloud fallback when edge fails
     </label>
+
+    <div class="section-title">Experimental — ASR Fallback</div>
+    <label style="display:flex; align-items:center; gap:8px; text-transform:none; letter-spacing:0; margin-bottom:4px; font-weight:500; color:#e2e8f0">
+        <input type="checkbox" id="asr-fallback" style="width:auto; margin:0">
+        Speech recognition when captions are unavailable
+    </label>
+    <p class="hint" id="asr-status-hint">Requires: ./venv/bin/pip install -r requirements-asr.txt</p>
 
     <label>Engine URL</label>
     <input type="text" id="engine-url" value="http://127.0.0.1:8000" placeholder="http://127.0.0.1:8000">

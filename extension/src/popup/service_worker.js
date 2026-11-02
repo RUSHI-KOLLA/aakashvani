@@ -35,7 +35,7 @@ async function getEngineUrl() {
 
 // ---- Offscreen document lifecycle (race-safe) ----
 let _offscreenCreating = null;
-async function ensureOffscreenDocument() {
+async function ensureOffscreenDocument(reasons = ['DOM_PARSER']) {
   if (await chrome.offscreen.hasDocument().catch(() => false)) return;
   if (_offscreenCreating) { await _offscreenCreating.catch(()=>{}); return; }
   _offscreenCreating = (async () => {
@@ -43,8 +43,10 @@ async function ensureOffscreenDocument() {
     try {
       await chrome.offscreen.createDocument({
         url: OFFSCREEN_PATH,
-        reasons: ['DOM_PARSER'],
-        justification: 'Chrome Translator API requires page context (not available in service workers)',
+        reasons,
+        justification: reasons.includes('USER_MEDIA')
+          ? 'Capturing active-tab audio for ASR fallback when video captions are unavailable, plus translation orchestrator'
+          : 'Chrome Translator API requires page context (not available in service workers)',
       });
       await new Promise((r) => setTimeout(r, 250));
     } catch (e) {
@@ -71,12 +73,17 @@ async function translateViaOffscreen(payload) {
   });
 }
 
-// ---- TTS (Piper ONNX) ----
-async function synthesizeSpeech(text, language, backend = 'piper') {
+// ---- TTS (Piper ONNX + Sarvam AI Bulbul) ----
+async function synthesizeSpeech(text, language, backend = 'piper', apiKey = '') {
   const engine = await getEngineUrl();
   const isPiper = backend === 'piper';
   const path = isPiper ? '/api/v1/tts/piper' : '/api/v1/tts';
   const body = { text, target_lang: language || 'te-IN' };
+  // Forward the Sarvam API key only when calling the Sarvam TTS endpoint.
+  // The key is never logged and never echoed back to the client.
+  if (!isPiper && apiKey) {
+    body.sarvam_api_key = apiKey;
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
   try {
@@ -129,6 +136,105 @@ async function prepareCheckpoint(lang, backend = 'piper') {
   return { ok: false, error: 'checkpoint download timed out' };
 }
 
+// ---- ASR fallback: capture active-tab audio → local Whisper transcription ----
+// Flow (user gesture required):
+//   popup toggle (ASR_ENABLE) → tabCapture.getMediaStreamId → offscreen document
+//   → getUserMedia(tab stream) → AudioContext 16 kHz → PCM chunks (~2 s)
+//   → ASR_CHUNK → POST {engine}/api/v1/asr → ASR_RESULT broadcast → dub pipeline.
+// Every failure mode surfaces as ASR_ERROR with a stable code.
+
+function asrError(code, message) {
+  return { ok: false, error: { code, message: String(message || code) } };
+}
+
+async function startASR(tabId) {
+  if (!chrome.tabCapture || !chrome.tabCapture.getMediaStreamId) {
+    return asrError('asr_tabcapture_unavailable',
+      'chrome.tabCapture is unavailable — check manifest permission "tabCapture"');
+  }
+  await ensureOffscreenDocument(['USER_MEDIA', 'DOM_PARSER']);
+
+  let streamId;
+  try {
+    streamId = await new Promise((resolve, reject) => {
+      chrome.tabCapture.getMediaStreamId({ targetTabId: tabId }, (id) => {
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+        else resolve(id);
+      });
+    });
+  } catch (e) {
+    // Permission denied / no media in tab / not a user gesture
+    return asrError('asr_permission_denied', e.message || 'tabCapture denied');
+  }
+  if (!streamId) {
+    return asrError('asr_permission_denied', 'tabCapture returned no stream id');
+  }
+
+  const engine = await getEngineUrl();
+  const settings = await getSettings();
+  const started = await new Promise((resolve) => {
+    chrome.runtime.sendMessage({
+      type: 'OFFSCREEN_ASR_START',
+      streamId,
+      engineUrl: engine,
+      language: settings.language || '',
+    }, (resp) => {
+      if (chrome.runtime.lastError) resolve(asrError('asr_offscreen_failed', chrome.runtime.lastError.message));
+      else resolve(resp || asrError('asr_offscreen_failed', 'no response from offscreen document'));
+    });
+  });
+  return started && started.ok ? { ok: true } : (started || asrError('asr_offscreen_failed', 'start failed'));
+}
+
+async function stopASR() {
+  await ensureOffscreenDocument(['USER_MEDIA', 'DOM_PARSER']);
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'OFFSCREEN_ASR_STOP' }, (resp) => {
+      if (chrome.runtime.lastError) resolve(asrError('asr_offscreen_failed', chrome.runtime.lastError.message));
+      else resolve(resp || { ok: true, stopped: false });
+    });
+  });
+}
+
+// Transcribe one PCM chunk and broadcast the result into content pages.
+async function handleASRChunk(msg) {
+  const engine = await getEngineUrl();
+  try {
+    const res = await fetch(`${engine}/api/v1/asr`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audio: msg.audio, language: msg.language || '' }),
+      signal: AbortSignal.timeout(20000),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      const detail = data.detail || {};
+      chrome.runtime.sendMessage({
+        type: 'ASR_ERROR',
+        code: detail.code || `asr_http_${res.status}`,
+        message: detail.message || `ASR request failed (${res.status})`,
+      }).catch(() => {});
+      return;
+    }
+    // Empty transcripts (pure music / silence / VAD) are legitimately skipped.
+    if (!data.text || !String(data.text).trim()) return;
+    chrome.runtime.sendMessage({
+      type: 'ASR_RESULT',
+      text: data.text,
+      seq: msg.seq,
+      duration: data.duration_seconds,
+      provider: data.provider,
+      model: data.model,
+    }).catch(() => {});
+  } catch (e) {
+    chrome.runtime.sendMessage({
+      type: 'ASR_ERROR',
+      code: 'asr_transport_error',
+      message: String(e.message || e),
+    }).catch(() => {});
+  }
+}
+
 // ---- Message router ----
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
@@ -150,11 +256,46 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           apiKey: msg.apiKey || settings.apiKey || '',
           engineUrl: engine,
         });
+        // Broadcast translation errors to UI so the popup can display them
+        if (!result.ok) {
+          chrome.runtime.sendMessage({ type: 'TRANSLATION_ERROR', error: result.error }).catch(() => {});
+        }
         sendResponse(result);
 
       } else if (msg.type === 'TTS_ONLY') {
-        const tts = await synthesizeSpeech(msg.text, msg.language, msg.backend);
-        sendResponse({ ok: true, audio: tts.audio_base64, duration: tts.duration_seconds });
+        const settings = await getSettings();
+        // Prefer the message-passed key (from sync_controller, which reads
+        // chrome.storage.local), falling back to the storage read here.
+        const apiKey = msg.apiKey || settings.apiKey || '';
+        const tts = await synthesizeSpeech(msg.text, msg.language, msg.backend, apiKey);
+        // Forward provider metadata so the extension can verify which engine
+        // generated each audio segment (no silent provider substitution).
+        sendResponse({
+          ok: true,
+          audio: tts.audio_base64,
+          duration: tts.duration_seconds,
+          provider: tts.provider || (tts.mode === 'sarvam' ? 'sarvam' : 'piper'),
+          request_id: tts.request_id || null,
+          language_code: tts.language_code || null,
+        });
+
+      } else if (msg.type === 'ASR_ENABLE') {
+        // Requires a user-gesture invocation (popup click) — activeTab gets
+        // granted, and the tab shows the capture indicator.
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab || !tab.id) {
+          sendResponse(asrError('asr_no_tab', 'no active tab'));
+        } else {
+          sendResponse(await startASR(tab.id));
+        }
+
+      } else if (msg.type === 'ASR_DISABLE') {
+        sendResponse(await stopASR());
+
+      } else if (msg.type === 'ASR_CHUNK') {
+        // Fire-and-forget: offscreen capture continues while transcription runs.
+        handleASRChunk(msg).catch(() => {});
+        sendResponse({ ok: true, accepted: true });
 
       } else {
         sendResponse({ ok: false, error: `unknown message type ${msg.type}` });

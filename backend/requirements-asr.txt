@@ -1,0 +1,14 @@
+# Optional ASR fallback dependencies for AakashVani.
+# Not installed by default — install with:
+#   ./venv/bin/pip install -r requirements-asr.txt
+#
+# faster-whisper runs on CPU (int8) or CUDA (float16). Model weights are
+# downloaded from Hugging Face on the FIRST /api/v1/asr request only —
+# never at startup and never automatically.
+#
+#   base    ~ 145 MB download, ~1 GB RAM, real-time-ish on modern CPUs
+#   small   ~ 480 MB download, ~2 GB RAM, better accuracy for Indic languages
+#   medium  ~ 1.5 GB download,  ~5 GB RAM, CPU: 2-4x slower than real time
+#   large-v3 ~ 3 GB download,  ~10 GB RAM, CPU: impractical; GPU recommended
+#
+faster-whisper>=1.0.0
