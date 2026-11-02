@@ -653,4 +653,15 @@
   });
 
   console.log('[AakashVani] caption observer active (stable timers, delta dispatch, DOM fallback)');
+
+  // Register this tab as the YouTube tab for TTS streaming
+  try {
+    chrome.runtime.sendMessage({ type: 'REGISTER_YOUTUBE_TAB', tabId: tabId }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.warn('[AakashVani] Failed to register YouTube tab:', chrome.runtime.lastError.message);
+      }
+    });
+  } catch (e) {
+    console.warn('[AakashVani] Could not register YouTube tab:', e.message);
+  }
 })();

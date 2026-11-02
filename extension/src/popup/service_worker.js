@@ -3,6 +3,9 @@
 //   - Translation: offscreen document (has page context → window.Translator) or Sarvam backend
 //   - TTS: local Piper ONNX via POST /api/v1/tts/piper
 //   - Service worker coordinates everything but never touches Translator API directly
+//
+// Tracks the YouTube tab that has the content script loaded.
+let _youtubeTabId = null;
 
 const DEFAULT_ENGINE = 'http://127.0.0.1:8000';
 const OFFSCREEN_PATH = 'offscreen.html';
@@ -15,6 +18,38 @@ chrome.storage.onChanged.addListener((changes) => {
     chrome.storage.local.remove('authError');
   }
 });
+
+// Called by content script when it loads on a YouTube page
+function setYoutubeTabId(tabId) {
+  _youtubeTabId = tabId;
+  console.log('[AakashVani] YouTube tab registered:', tabId);
+}
+
+function getYoutubeTabId() {
+  return _youtubeTabId;
+}
+
+async function getActiveYoutubeTab() {
+  // Prefer the registered YouTube tab
+  if (_youtubeTabId) {
+    try {
+      const tab = await chrome.tabs.get(_youtubeTabId);
+      if (tab && tab.url && tab.url.includes('youtube.com')) {
+        return tab;
+      }
+    } catch (e) {
+      // Tab might be closed
+      _youtubeTabId = null;
+    }
+  }
+  // Fallback: find any YouTube tab
+  const tabs = await chrome.tabs.query({ url: 'https://www.youtube.com/*' });
+  if (tabs.length > 0) {
+    _youtubeTabId = tabs[0].id;
+    return tabs[0];
+  }
+  return null;
+}
 
 async function getSettings() {
   return chrome.storage.local.get(['mode', 'language', 'apiKey', 'cloudFallback', 'ducking', 'engineUrl']);
@@ -400,9 +435,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       } else if (msg.type === 'TTS_STREAM') {
         // Streaming TTS for Piper: forward stream to content script for playback
         // (service workers cannot play audio directly)
-        const tab = await getActiveTab();
+        const tab = await getActiveYoutubeTab();
         if (!tab) {
-          sendResponse({ ok: false, error: { message: 'No active tab for audio playback' } });
+          sendResponse({ ok: false, error: { message: 'No YouTube tab found for audio playback' } });
           return;
         }
         
@@ -498,6 +533,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         // Fire-and-forget: offscreen capture continues while transcription runs.
         handleASRChunk(msg).catch(() => {});
         sendResponse({ ok: true, accepted: true });
+
+      } else if (msg.type === 'REGISTER_YOUTUBE_TAB') {
+        setYoutubeTabId(msg.tabId);
+        sendResponse({ ok: true });
 
       } else {
         sendResponse({ ok: false, error: `unknown message type ${msg.type}` });
