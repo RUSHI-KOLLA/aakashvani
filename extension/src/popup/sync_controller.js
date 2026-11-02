@@ -1359,96 +1359,45 @@ class SyncController {
     let ttsDuration = null;
     let ttsRequestId = null;
     if (!audioBase64) {
-      // Use streaming TTS for Piper (plays chunks as they arrive, much lower latency)
-      // For Sarvam and other backends, fall back to regular TTS
-      if (backend === 'piper') {
-        // Streaming TTS: plays chunks as they arrive, returns when done
-        let streamResult;
-        try {
-          streamResult = await new Promise((resolve, reject) => {
-            chrome.runtime.sendMessage({
-              type: 'TTS_STREAM',
-              text: translated,
-              language: lang,
-              backend,
-              apiKey: settings.apiKey || ''
-            }, (response) => {
-              if (chrome.runtime.lastError) {
-                reject(new Error(chrome.runtime.lastError.message));
-              } else if (response && response.ok) {
-                resolve(response);
-              } else {
-                reject(new Error(response?.error?.message || 'TTS stream failed'));
-              }
-            });
-          });
-        } catch (streamError) {
-          console.warn('[AakashVani] Streaming TTS failed, falling back to regular TTS:', streamError.message);
-          streamResult = null;
-        }
-        
-        // Fallback to regular TTS if streaming failed
-        if (!streamResult || !streamResult.ok) {
-          console.warn('[AakashVani] Streaming TTS unavailable, using regular TTS fallback');
-          // Fall through to regular TTS below
-        } else {
-          // Validate that streaming actually produced audio (duration > 0, chunks > 0)
-          const hasAudio = streamResult.duration > 0 && streamResult.chunks > 0;
-          if (!hasAudio) {
-            console.warn('[AakashVani] Streaming TTS produced empty audio (duration:', streamResult.duration, 'chunks:', streamResult.chunks, '), falling back to regular TTS');
-            // Fall through to regular TTS below
-          } else {
-            ttsDuration = streamResult.duration;
-            ttsRequestId = streamResult.request_id || `stream-${Date.now()}`;
-            // For streaming, we don't have base64 audio - the audio was played directly
-            // Create a placeholder for cache (streaming doesn't cache the same way)
-            audioBase64 = `stream:${ttsRequestId}`;
-          }
-        }
+      // Regular TTS for ALL backends (Piper, Sarvam, etc.) — unified path like Sarvam
+      let tts;
+      try {
+        tts = await chrome.runtime.sendMessage({ type: 'TTS_ONLY', text: translated, language: lang, backend, apiKey: settings.apiKey || '' });
+      } catch (e) {
+        if (genAtStart !== undefined && genAtStart !== this._generation) return null;
+        console.warn(`[AakashVani] TTS transport error:`, e.message);
+        return null;
       }
-      
-      // Regular TTS (for Sarvam, or Piper fallback)
-      if (!audioBase64) {
-        // Regular TTS for Sarvam and other backends
-        let tts;
-        try {
-          tts = await chrome.runtime.sendMessage({ type: 'TTS_ONLY', text: translated, language: lang, backend, apiKey: settings.apiKey || '' });
-        } catch (e) {
-          if (genAtStart !== undefined && genAtStart !== this._generation) return null;
-          console.warn(`[AakashVani] TTS transport error:`, e.message);
+      if (!tts) return null;
+      if (!tts.ok) {
+        const errMsg = tts.error || '';
+        if (errMsg.startsWith('checkpoint_preparing:')) {
+          const missingLang = errMsg.split(':')[1];
+          console.warn(`[AakashVani] TTS checkpoint preparing for ${missingLang} — buffering segment`);
+          if (this._checkpointBuffer.length < this._checkpointBufferMax) {
+            this._checkpointBuffer.push({ caption, genAtStart, translated });
+          }
+          if (caption.seq !== undefined && this.transcriptController) {
+            this.transcriptController.markFailed(caption.id, errMsg);
+          }
           return null;
         }
-        if (!tts) return null;
-        if (!tts.ok) {
-          const errMsg = tts.error || '';
-          if (errMsg.startsWith('checkpoint_preparing:')) {
-            const missingLang = errMsg.split(':')[1];
-            console.warn(`[AakashVani] TTS checkpoint preparing for ${missingLang} — buffering segment`);
-            if (this._checkpointBuffer.length < this._checkpointBufferMax) {
-              this._checkpointBuffer.push({ caption, genAtStart, translated });
-            }
-            if (caption.seq !== undefined && this.transcriptController) {
-              this.transcriptController.markFailed(caption.id, errMsg);
-            }
-            return null;
-          }
-          console.warn(`[AakashVani] TTS failed (${tts.error?.slice(0, 120)}) | text=${JSON.stringify(translated).slice(0, 80)}`);
-          if (caption.seq !== undefined && this.transcriptController) {
-            this.transcriptController.markFailed(caption.id, tts.error);
-          }
-          throw new Error(tts.error);
+        console.warn(`[AakashVani] TTS failed (${tts.error?.slice(0, 120)}) | text=${JSON.stringify(translated).slice(0, 80)}`);
+        if (caption.seq !== undefined && this.transcriptController) {
+          this.transcriptController.markFailed(caption.id, tts.error);
         }
-        audioBase64 = tts.audio;
-        ttsDuration = tts.duration_seconds;
-        ttsRequestId = tts.request_id;
-        // Cache TTS
-        if (this._ttsCache.size >= this._cacheMax) {
-          const firstKey = this._ttsCache.keys().next().value;
-          this._ttsCache.delete(firstKey);
-          this._resourceStats.cacheEvictions++;
-        }
-        this._ttsCache.set(ttsCacheKey, audioBase64);
+        throw new Error(tts.error);
       }
+      audioBase64 = tts.audio;
+      ttsDuration = tts.duration_seconds;
+      ttsRequestId = tts.request_id;
+      // Cache TTS
+      if (this._ttsCache.size >= this._cacheMax) {
+        const firstKey = this._ttsCache.keys().next().value;
+        this._ttsCache.delete(firstKey);
+        this._resourceStats.cacheEvictions++;
+      }
+      this._ttsCache.set(ttsCacheKey, audioBase64);
     }
 
     // Lifecycle: synthesizing → queued
